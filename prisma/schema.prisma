@@ -1,0 +1,338 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         UserRole
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  driver       Driver?
+  student      Student?
+
+  @@index([role])
+  @@index([active])
+}
+
+model Student {
+  id            String                 @id @default(cuid())
+  studentId     String                 @unique
+  name          String
+  userId        String                 @unique
+  active        Boolean                @default(true)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+
+  notifications Notification[]
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments   StudentBusAssignment[]
+  tripStatuses  StudentTripStatus[]
+
+  @@index([studentId])
+  @@index([active])
+}
+
+model Driver {
+  id          String                @id @default(cuid())
+  driverId    String                @unique
+  name        String
+  userId      String                @unique
+  active      Boolean               @default(true)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments DriverBusAssignment[]
+  emergencies Emergency[]
+  trips       Trip[]
+
+  @@index([driverId])
+  @@index([active])
+}
+
+model Bus {
+  id                 String                 @id @default(cuid())
+  busId              String                 @unique
+  busNumber          String
+  registration       String                 @unique
+  status             BusStatus              @default(WAITING)
+  active             Boolean                @default(true)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  driverAssignments  DriverBusAssignment[]
+  emergencies        Emergency[]
+  liveLocations      LiveLocation[]
+  studentAssignments StudentBusAssignment[]
+  trips              Trip[]
+
+  @@index([busNumber])
+  @@index([status])
+  @@index([active])
+}
+
+model Route {
+  id          String                 @id @default(cuid())
+  routeId     String                 @unique
+  name        String
+  active      Boolean                @default(true)
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  stops       BusStop[]
+  assignments StudentBusAssignment[]
+  trips       Trip[]
+
+  @@index([active])
+}
+
+model BusStop {
+  id           String                 @id @default(cuid())
+  stopId       String                 @unique
+  name         String
+  latitude     Float
+  longitude    Float
+  sequence     Int
+  routeId      String
+  active       Boolean                @default(true)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+
+  route        Route                  @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  assignments  StudentBusAssignment[]
+  tripStatuses StudentTripStatus[]
+
+  @@unique([routeId, sequence])
+  @@index([routeId])
+  @@index([active])
+}
+
+model StudentBusAssignment {
+  id        String   @id @default(cuid())
+  studentId String
+  busId     String
+  routeId   String
+  stopId    String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bus       Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  route     Route    @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  stop      BusStop  @relation(fields: [stopId], references: [id], onDelete: Cascade)
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId])
+  @@index([busId])
+  @@index([routeId])
+  @@index([stopId])
+  @@index([active])
+}
+
+model DriverBusAssignment {
+  id        String   @id @default(cuid())
+  driverId  String
+  busId     String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bus       Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  driver    Driver   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([driverId])
+  @@index([busId])
+  @@index([active])
+}
+
+model Trip {
+  id              String              @id @default(cuid())
+  tripId          String              @unique
+
+  busId           String
+  driverId        String
+  routeId         String
+
+  /*
+   * Daily trip support.
+   *
+   * This is temporarily nullable because existing historical
+   * Trip records do not have a tripDate yet.
+   *
+   * We will safely backfill old records before making this
+   * required for new daily-trip creation.
+   */
+  tripDate        DateTime?
+
+  status          TripStatus          @default(SCHEDULED)
+
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  emergencies     Emergency[]
+  liveLocations   LiveLocation[]
+  studentStatuses StudentTripStatus[]
+
+  bus             Bus                 @relation(fields: [busId], references: [id])
+  driver          Driver              @relation(fields: [driverId], references: [id])
+  route           Route               @relation(fields: [routeId], references: [id])
+
+  @@index([busId])
+  @@index([driverId])
+  @@index([routeId])
+  @@index([tripDate])
+  @@index([status])
+}
+
+model LiveLocation {
+  id         String   @id @default(cuid())
+  tripId     String
+  busId      String
+
+  latitude   Float
+  longitude  Float
+  accuracy   Float?
+  speed      Float?
+  heading    Float?
+
+  recordedAt DateTime
+  createdAt  DateTime @default(now())
+
+  bus        Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  trip       Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId, recordedAt])
+  @@index([busId, recordedAt])
+}
+
+model StudentTripStatus {
+  id        String           @id @default(cuid())
+  tripId    String
+  studentId String
+  stopId    String
+
+  status    StudentTripState @default(WAITING)
+
+  boardedAt DateTime?
+  missedAt  DateTime?
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  stop      BusStop          @relation(fields: [stopId], references: [id])
+  student   Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  trip      Trip             @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, studentId])
+
+  @@index([studentId])
+  @@index([tripId])
+  @@index([stopId])
+  @@index([status])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  studentId String
+
+  type      NotificationType
+  title     String
+  message   String
+
+  tripId    String?
+  read      Boolean          @default(false)
+
+  createdAt DateTime         @default(now())
+
+  student   Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@index([tripId])
+}
+
+model Emergency {
+  id         String          @id @default(cuid())
+  tripId     String
+  busId      String
+  driverId   String
+
+  latitude   Float?
+  longitude  Float?
+
+  status     EmergencyStatus @default(ACTIVE)
+  message    String?
+
+  createdAt  DateTime        @default(now())
+  resolvedAt DateTime?
+
+  bus        Bus             @relation(fields: [busId], references: [id])
+  driver     Driver          @relation(fields: [driverId], references: [id])
+  trip       Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+  @@index([busId])
+  @@index([driverId])
+  @@index([status])
+}
+
+enum UserRole {
+  ADMIN
+  DRIVER
+  STUDENT
+}
+
+enum BusStatus {
+  WAITING
+  RUNNING
+  EMERGENCY
+  OFFLINE
+  INACTIVE
+}
+
+enum TripStatus {
+  SCHEDULED
+  RUNNING
+  COMPLETED
+  CANCELLED
+}
+
+enum StudentTripState {
+  WAITING
+  APPROACHING
+  ARRIVED
+  BOARDED
+  POSSIBLE_MISSED
+  MISSED
+  ABSENT
+}
+
+enum NotificationType {
+  BUS_STARTED
+  BUS_APPROACHING
+  BUS_NEAR
+  BUS_ARRIVING
+  POSSIBLE_MISSED_BUS
+  DELAY
+  BREAKDOWN
+  REPLACEMENT_BUS
+  EMERGENCY
+  GENERAL
+}
+
+enum EmergencyStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+}
