@@ -45,3 +45,5 @@ generated/prisma/
 # TypeScript cache
 *.tsbuildinfo
 app/admin/trips/page.backup.tsx
+*.backup
+*.dump
