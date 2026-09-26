@@ -47,3 +47,11 @@ generated/prisma/
 app/admin/trips/page.backup.tsx
 *.backup
 *.dump
+# Local backup copies
+app/student/dashboard/*.backup-*
+restore-*.txt
+check-counts.sql
+clear-supabase-data.sql
+prisma/check-developer.ts
+prisma/create-developer.ts
+prisma/update-student-voice-names.ts

@@ -1,9 +1,13 @@
-import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
+import { jwtVerify, SignJWT } from "jose";
 
 const SESSION_COOKIE = "bus_tracking_session";
 
-export type UserRole = "ADMIN" | "DRIVER" | "STUDENT";
+export type UserRole =
+  | "ADMIN"
+  | "DRIVER"
+  | "STUDENT"
+  | "DEVELOPER";
 
 export type SessionPayload = {
   sub: string;
@@ -80,7 +84,8 @@ export async function getSession(): Promise<SessionPayload | null> {
       typeof payload.username !== "string" ||
       (payload.role !== "ADMIN" &&
         payload.role !== "DRIVER" &&
-        payload.role !== "STUDENT")
+        payload.role !== "STUDENT" &&
+        payload.role !== "DEVELOPER")
     ) {
       return null;
     }
@@ -88,7 +93,7 @@ export async function getSession(): Promise<SessionPayload | null> {
     return {
       sub: payload.sub,
       username: payload.username,
-      role: payload.role,
+      role: payload.role as UserRole,
       studentId:
         typeof payload.studentId === "string"
           ? payload.studentId

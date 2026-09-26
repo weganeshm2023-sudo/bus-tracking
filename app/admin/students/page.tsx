@@ -3,6 +3,17 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
+type StudentLocation = {
+  id: string;
+  studentId: string;
+  name: string;
+  address: string | null;
+  latitude: number;
+  longitude: number;
+  active: boolean;
+  updatedAt: string;
+};
+
 type Student = {
   id: string;
   studentId: string;
@@ -11,6 +22,7 @@ type Student = {
     id: string;
     username: string;
   };
+  location: StudentLocation | null;
   assignments: Array<{
     id: string;
     bus: {
@@ -36,6 +48,10 @@ type FormState = {
   name: string;
   username: string;
   password: string;
+  locationName: string;
+  address: string;
+  latitude: string;
+  longitude: string;
 };
 
 const emptyForm: FormState = {
@@ -43,6 +59,10 @@ const emptyForm: FormState = {
   name: "",
   username: "",
   password: "",
+  locationName: "",
+  address: "",
+  latitude: "",
+  longitude: "",
 };
 
 export default function AdminStudentsPage() {
@@ -97,6 +117,8 @@ export default function AdminStudentsPage() {
         student.name.toLowerCase().includes(value) ||
         student.studentId.toLowerCase().includes(value) ||
         student.user.username.toLowerCase().includes(value) ||
+        student.location?.name.toLowerCase().includes(value) ||
+        student.location?.address?.toLowerCase().includes(value) ||
         student.assignments.some(
           (assignment) =>
             assignment.bus.busId.toLowerCase().includes(value) ||
@@ -122,6 +144,16 @@ export default function AdminStudentsPage() {
       name: student.name,
       username: student.user.username,
       password: "",
+      locationName: student.location?.name ?? "",
+      address: student.location?.address ?? "",
+      latitude:
+        student.location?.latitude !== undefined
+          ? String(student.location.latitude)
+          : "",
+      longitude:
+        student.location?.longitude !== undefined
+          ? String(student.location.longitude)
+          : "",
     });
 
     setMessage("");
@@ -185,9 +217,65 @@ export default function AdminStudentsPage() {
     }
   }
 
+  async function deleteStudentLocation(student: Student) {
+    if (!student.location) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Remove the saved location for ${student.name} (${student.studentId})?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setMessage("");
+      setError("");
+
+      const response = await fetch("/api/admin/students", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          id: student.id,
+          deleteLocation: true,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Unable to remove student location.");
+      }
+
+      setMessage(data.message || "Student location removed successfully.");
+
+      if (editingId === student.id) {
+        setForm((current) => ({
+          ...current,
+          locationName: "",
+          address: "",
+          latitude: "",
+          longitude: "",
+        }));
+      }
+
+      await loadStudents();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to remove student location."
+      );
+    }
+  }
+
   async function deleteStudent(student: Student) {
     const confirmed = window.confirm(
-      `Delete ${student.name} (${student.studentId})?\n\nThis will also remove the student's login account.`
+      `Delete ${student.name} (${student.studentId})?\n\nThis will also remove the student's login account and saved location.`
     );
 
     if (!confirmed) {
@@ -343,51 +431,102 @@ export default function AdminStudentsPage() {
                 </h3>
 
                 <p className="mt-1 text-sm text-slate-500">
-                  Create and manage student accounts used by the student
-                  tracking portal.
+                  Create and manage student accounts and their individual
+                  pickup locations.
                 </p>
               </div>
 
-              <form
-                onSubmit={handleSubmit}
-                className="grid gap-4 md:grid-cols-2 xl:grid-cols-4"
-              >
-                <Field
-                  label="Student ID"
-                  placeholder="STU-0002"
-                  value={form.studentId}
-                  onChange={(value) => updateField("studentId", value)}
-                />
+              <form onSubmit={handleSubmit} className="space-y-6">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <Field
+                    label="Student ID"
+                    placeholder="STU-0002"
+                    value={form.studentId}
+                    onChange={(value) => updateField("studentId", value)}
+                  />
 
-                <Field
-                  label="Student Name"
-                  placeholder="Arun Kumar"
-                  value={form.name}
-                  onChange={(value) => updateField("name", value)}
-                />
+                  <Field
+                    label="Student Name"
+                    placeholder="Arun Kumar"
+                    value={form.name}
+                    onChange={(value) => updateField("name", value)}
+                  />
 
-                <Field
-                  label="Username"
-                  placeholder="student02"
-                  value={form.username}
-                  onChange={(value) => updateField("username", value)}
-                />
+                  <Field
+                    label="Username"
+                    placeholder="student02"
+                    value={form.username}
+                    onChange={(value) => updateField("username", value)}
+                  />
 
-                <Field
-                  label={
-                    editingId
-                      ? "New Password (optional)"
-                      : "Password"
-                  }
-                  placeholder={
-                    editingId ? "Leave blank to keep current" : "••••••••"
-                  }
-                  type="password"
-                  value={form.password}
-                  onChange={(value) => updateField("password", value)}
-                />
+                  <Field
+                    label={
+                      editingId ? "New Password (optional)" : "Password"
+                    }
+                    placeholder={
+                      editingId ? "Leave blank to keep current" : "••••••••"
+                    }
+                    type="password"
+                    value={form.password}
+                    onChange={(value) => updateField("password", value)}
+                  />
+                </div>
 
-                <div className="flex flex-wrap items-end gap-3 md:col-span-2 xl:col-span-4">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/50 p-5">
+                  <div className="mb-5">
+                    <p className="text-sm font-semibold text-blue-700">
+                      📍 Individual Student Location
+                    </p>
+
+                    <p className="mt-1 text-xs text-slate-500">
+                      This location is used as the student&apos;s individual
+                      pickup point on the live tracking map.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    <Field
+                      label="Location Name"
+                      placeholder="Poovandhi Home"
+                      value={form.locationName}
+                      onChange={(value) =>
+                        updateField("locationName", value)
+                      }
+                    />
+
+                    <Field
+                      label="Address"
+                      placeholder="Poovandhi, Sivaganga"
+                      value={form.address}
+                      onChange={(value) => updateField("address", value)}
+                    />
+
+                    <Field
+                      label="Latitude"
+                      placeholder="9.866123"
+                      type="number"
+                      value={form.latitude}
+                      onChange={(value) => updateField("latitude", value)}
+                    />
+
+                    <Field
+                      label="Longitude"
+                      placeholder="78.123456"
+                      type="number"
+                      value={form.longitude}
+                      onChange={(value) =>
+                        updateField("longitude", value)
+                      }
+                    />
+                  </div>
+
+                  <p className="mt-4 text-xs text-slate-500">
+                    Example: Latitude must be between -90 and 90. Longitude
+                    must be between -180 and 180.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
                   <button
                     type="submit"
                     disabled={saving}
@@ -430,7 +569,7 @@ export default function AdminStudentsPage() {
                   <input
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
-                    placeholder="Search student, ID, bus, route..."
+                    placeholder="Search student, ID, location, bus..."
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
                   />
                 </div>
@@ -460,7 +599,7 @@ export default function AdminStudentsPage() {
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1050px] text-left">
+                  <table className="w-full min-w-[1250px] text-left">
                     <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
                       <tr>
                         <th className="px-6 py-4 font-semibold">
@@ -477,6 +616,9 @@ export default function AdminStudentsPage() {
                         </th>
                         <th className="px-6 py-4 font-semibold">
                           Pickup Stop
+                        </th>
+                        <th className="px-6 py-4 font-semibold">
+                          Student Location
                         </th>
                         <th className="px-6 py-4 font-semibold">
                           Action
@@ -564,7 +706,35 @@ export default function AdminStudentsPage() {
                             </td>
 
                             <td className="px-6 py-5">
-                              <div className="flex items-center gap-2">
+                              {student.location ? (
+                                <div>
+                                  <p className="font-medium text-slate-800">
+                                    {student.location.name}
+                                  </p>
+
+                                  <p className="mt-1 max-w-[230px] truncate text-xs text-slate-400">
+                                    {student.location.address ||
+                                      "Address not provided"}
+                                  </p>
+
+                                  <p className="mt-1 text-xs text-slate-500">
+                                    {student.location.latitude.toFixed(6)},{" "}
+                                    {student.location.longitude.toFixed(6)}
+                                  </p>
+
+                                  <span className="mt-2 inline-flex rounded-full bg-green-100 px-2.5 py-1 text-[11px] font-semibold text-green-700">
+                                    Location Saved
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="inline-flex rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-semibold text-amber-700">
+                                  Location Not Set
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="px-6 py-5">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <button
                                   type="button"
                                   onClick={() => startEdit(student)}
@@ -572,6 +742,18 @@ export default function AdminStudentsPage() {
                                 >
                                   Edit
                                 </button>
+
+                                {student.location && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      deleteStudentLocation(student)
+                                    }
+                                    className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 transition hover:bg-amber-100"
+                                  >
+                                    Remove Location
+                                  </button>
+                                )}
 
                                 <button
                                   type="button"
@@ -645,6 +827,7 @@ function Field({
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         autoComplete="off"
+        step={type === "number" ? "any" : undefined}
         className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-100"
       />
     </label>

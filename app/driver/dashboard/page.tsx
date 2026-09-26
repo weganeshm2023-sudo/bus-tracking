@@ -1,1257 +1,2487 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
 import { io, Socket } from "socket.io-client";
 
-type DriverData = {
-  id: string;
-  driverId: string;
-  name: string;
-  phone?: string | null;
+type TripStatus =
+  | "SCHEDULED"
+  | "RUNNING"
+  | "COMPLETED"
+  | "CANCELLED"
+  | "BOARDING"
+  | "IN_PROGRESS"
+  | string;
+
+type Driver = {
+  id?: string;
+  driverId?: string;
+  name?: string;
   username?: string;
 };
 
+type Bus = {
+  id?: string;
+  busId?: string;
+  busNumber?: string;
+  registration?: string;
+  status?: string;
+};
+
+type Route = {
+  id?: string;
+  routeId?: string;
+  name?: string;
+  origin?: string;
+  destination?: string;
+};
+
 type Trip = {
-  id: string;
-  tripId: string;
-  status:
-    | "SCHEDULED"
-    | "RUNNING"
-    | "COMPLETED"
-    | "CANCELLED";
-  bus?: {
-    id?: string;
-    busId?: string;
-    busNumber?: string;
-  } | null;
-  route?: {
-    id?: string;
-    routeId?: string;
-    name?: string;
-    routeName?: string;
-    origin?: string;
-    destination?: string;
-  } | null;
-  scheduledAt?: string | null;
-  startTime?: string | null;
-  endTime?: string | null;
+  id?: string;
+  tripId?: string;
+  status?: TripStatus;
+  busId?: string;
+  routeId?: string;
+  driverId?: string;
+  travelDate?: string;
+  tripDate?: string;
+  departureTime?: string;
+  arrivalTime?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+
+  bus?: Bus;
+  route?: Route;
 };
 
-type DashboardResponse = {
-  success: boolean;
-  message?: string;
-  driver?: DriverData;
+type Assignment = {
+  id?: string;
+  bus?: Bus;
+  route?: Route;
+  busId?: string;
+  routeId?: string;
+};
+
+type GPSLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  speed: number | null;
+  heading: number | null;
+  recordedAt?: string;
+};
+
+type DashboardData = {
+  driver?: Driver;
+  assignment?: Assignment | null;
+  driverAssignment?: Assignment | null;
+
   trips?: Trip[];
-  assignments?: unknown[];
+  assignedTrips?: Trip[];
+
+  activeTrip?: Trip | null;
+  runningTrip?: Trip | null;
 };
 
-type SocketTokenResponse = {
-  success: boolean;
-  token?: string;
-  message?: string;
-};
-
-type StartTripResponse = {
+type SocketLocationSuccess = {
   success?: boolean;
-  message?: string;
   tripId?: string;
   busId?: string;
-  startedAt?: string;
-};
-
-type StopTripResponse = {
-  success?: boolean;
+  recordedAt?: string;
   message?: string;
-  tripId?: string;
-  completedAt?: string;
 };
 
-type GpsStatus =
-  | "OFFLINE"
-  | "SEARCHING"
-  | "GOOD"
-  | "FAIR"
-  | "POOR";
+type TrackingError = {
+  message?: string;
+};
+
+const SOCKET_URL = "http://127.0.0.1:4001";
+
+const GPS_MAX_ACCURACY = 1000;
+const GPS_REFRESH_INTERVAL = 15_000;
+const GPS_STALE_AFTER = 60_000;
+
+const SOCKET_RECONNECT_CHECK = 5_000;
+const SOCKET_RECONNECT_DELAY = 1_000;
+const SOCKET_RECONNECT_DELAY_MAX = 5_000;
+
+const GPS_OPTIONS: PositionOptions = {
+  enableHighAccuracy: true,
+  maximumAge: 0,
+  timeout: 30_000,
+};
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
+}
+
+function formatTime(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function gpsLevel(accuracy: number | null) {
+  if (accuracy === null || !Number.isFinite(accuracy)) {
+    return "UNKNOWN";
+  }
+
+  if (accuracy <= 50) {
+    return "GOOD";
+  }
+
+  if (accuracy <= 200) {
+    return "FAIR";
+  }
+
+  return "POOR";
+}
+
+function gpsLevelClass(level: string) {
+  switch (level) {
+    case "GOOD":
+      return "bg-emerald-500/10 text-emerald-400 border-emerald-500/20";
+
+    case "FAIR":
+      return "bg-amber-500/10 text-amber-400 border-amber-500/20";
+
+    case "POOR":
+      return "bg-red-500/10 text-red-400 border-red-500/20";
+
+    default:
+      return "bg-slate-500/10 text-slate-400 border-slate-500/20";
+  }
+}
+
+function isValidCoordinate(
+  latitude: number,
+  longitude: number,
+) {
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+}
+
+function normalizeTrip(trip: any): Trip {
+  return {
+    ...trip,
+
+    tripId:
+      typeof trip?.tripId === "string"
+        ? trip.tripId
+        : typeof trip?.id === "string"
+          ? trip.id
+          : undefined,
+
+    status:
+      typeof trip?.status === "string"
+        ? trip.status
+        : "SCHEDULED",
+
+    bus: trip?.bus
+      ? {
+          ...trip.bus,
+        }
+      : undefined,
+
+    route: trip?.route
+      ? {
+          ...trip.route,
+        }
+      : undefined,
+  };
+}
+
+function normalizeDashboardResponse(
+  result: any,
+): DashboardData {
+  const rawTrips = Array.isArray(result?.trips)
+    ? result.trips
+    : Array.isArray(result?.assignedTrips)
+      ? result.assignedTrips
+      : [];
+
+  const trips = rawTrips.map(normalizeTrip);
+
+  const assignment =
+    result?.assignment ??
+    result?.driverAssignment ??
+    result?.activeAssignment ??
+    null;
+
+  const activeTrip =
+    result?.activeTrip ??
+    result?.runningTrip ??
+    trips.find(
+      (trip: Trip) => trip.status === "RUNNING",
+    ) ??
+    null;
+
+  return {
+    driver: result?.driver ?? result?.user ?? undefined,
+
+    assignment,
+
+    driverAssignment:
+      result?.driverAssignment ??
+      assignment ??
+      null,
+
+    trips,
+
+    assignedTrips: trips,
+
+    activeTrip: activeTrip
+      ? normalizeTrip(activeTrip)
+      : null,
+
+    runningTrip:
+      activeTrip &&
+      normalizeTrip(activeTrip).status === "RUNNING"
+        ? normalizeTrip(activeTrip)
+        : null,
+  };
+}
 
 export default function DriverDashboardPage() {
-  const socketRef = useRef<Socket | null>(null);
+  /* =========================================================
+     BASIC STATE
+  ========================================================= */
 
-  const watchIdRef = useRef<number | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const currentTripRef = useRef<Trip | null>(null);
+  const [error, setError] = useState("");
 
-  const startTimeoutRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [message, setMessage] = useState("");
 
-  const gpsRetryTimeoutRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const lastValidPositionRef =
-    useRef<GeolocationPosition | null>(null);
-
-  const [driver, setDriver] =
-    useState<DriverData | null>(null);
-
-  const [trips, setTrips] =
-    useState<Trip[]>([]);
+  const [dashboard, setDashboard] =
+    useState<DashboardData | null>(null);
 
   const [selectedTripId, setSelectedTripId] =
     useState("");
 
-  const [loading, setLoading] =
-    useState(true);
-
-  const [starting, setStarting] =
-    useState(false);
-
-  const [tracking, setTracking] =
-    useState(false);
-
   const [socketConnected, setSocketConnected] =
     useState(false);
 
-  const [latitude, setLatitude] =
-    useState<number | null>(null);
-
-  const [longitude, setLongitude] =
-    useState<number | null>(null);
-
-  const [speed, setSpeed] =
-    useState<number | null>(null);
-
-  const [accuracy, setAccuracy] =
-    useState<number | null>(null);
-
-  const [heading, setHeading] =
-    useState<number | null>(null);
+  const [socketStatus, setSocketStatus] =
+    useState("CONNECTING");
 
   const [gpsStatus, setGpsStatus] =
-    useState<GpsStatus>("OFFLINE");
+    useState("Searching GPS...");
 
-  const [lastGpsTime, setLastGpsTime] =
-    useState<Date | null>(null);
-
-  const [message, setMessage] =
+  const [gpsError, setGpsError] =
     useState("");
 
-  const [error, setError] =
-    useState("");
+  const [gpsLocation, setGpsLocation] =
+    useState<GPSLocation | null>(null);
 
-  /*
-   * ==========================================================
-   * LOAD DRIVER DASHBOARD
-   * ==========================================================
-   */
+  const [lastValidGPS, setLastValidGPS] =
+    useState<string | null>(null);
+
+  const [sendingGPS, setSendingGPS] =
+    useState(false);
+
+  const [startingTrip, setStartingTrip] =
+    useState(false);
+
+  const [stoppingTrip, setStoppingTrip] =
+    useState(false);
+
+  const [lastSocketSuccess, setLastSocketSuccess] =
+    useState<string | null>(null);
+
+  const [now, setNow] = useState(Date.now());
+
+  /* =========================================================
+     REFS
+  ========================================================= */
+
+  const socketRef =
+    useRef<Socket | null>(null);
+
+  const socketTokenRef =
+    useRef<string | null>(null);
+
+  const watchIdRef =
+    useRef<number | null>(null);
+
+  const gpsIntervalRef =
+    useRef<ReturnType<typeof setInterval> | null>(
+      null,
+    );
+
+  const gpsRestartTimerRef =
+    useRef<number | null>(null);
+
+  const socketReconnectTimerRef =
+    useRef<number | null>(null);
+
+  const latestGPSRef =
+    useRef<GPSLocation | null>(null);
+
+  const gpsSendingRef =
+    useRef(false);
+
+  const mountedRef =
+    useRef(false);
+
+  const pageActiveRef =
+    useRef(true);
+
+  const connectingRef =
+    useRef(false);
+
+  const startingGPSRef =
+    useRef(false);
+
+  const selectedTripIdRef =
+    useRef("");
+
+  const dashboardRef =
+    useRef<DashboardData | null>(null);
+
+  /* =========================================================
+     DERIVED VALUES
+  ========================================================= */
+
+  const trips = useMemo(() => {
+    return (
+      dashboard?.trips ??
+      dashboard?.assignedTrips ??
+      []
+    );
+  }, [dashboard]);
+
+  const selectedTrip = useMemo(() => {
+    if (selectedTripId) {
+      const exact = trips.find(
+        (trip) =>
+          trip.tripId === selectedTripId ||
+          trip.id === selectedTripId,
+      );
+
+      if (exact) {
+        return exact;
+      }
+    }
+
+    return (
+      dashboard?.activeTrip ??
+      dashboard?.runningTrip ??
+      trips.find(
+        (trip) => trip.status === "RUNNING",
+      ) ??
+      trips[0] ??
+      null
+    );
+  }, [
+    dashboard,
+    selectedTripId,
+    trips,
+  ]);
+
+  const selectedTripStatus =
+    selectedTrip?.status ?? "—";
+
+  const selectedBus =
+    selectedTrip?.bus ??
+    dashboard?.assignment?.bus ??
+    dashboard?.driverAssignment?.bus ??
+    null;
+
+  const selectedRoute =
+    selectedTrip?.route ??
+    dashboard?.assignment?.route ??
+    dashboard?.driverAssignment?.route ??
+    null;
+
+  const gpsAccuracy =
+    gpsLocation?.accuracy ?? null;
+
+  const currentGpsLevel =
+    gpsLevel(gpsAccuracy);
+
+  const gpsIsStale =
+    gpsLocation?.recordedAt
+      ? now -
+          new Date(
+            gpsLocation.recordedAt,
+          ).getTime() >
+        GPS_STALE_AFTER
+      : true;
+
+  /* =========================================================
+     KEEP REFS UPDATED
+  ========================================================= */
 
   useEffect(() => {
-    loadDashboard();
+    selectedTripIdRef.current =
+      selectedTrip?.tripId ??
+      selectedTrip?.id ??
+      selectedTripId ??
+      "";
+  }, [
+    selectedTrip,
+    selectedTripId,
+  ]);
 
-    return () => {
-      stopGpsTracking();
+  useEffect(() => {
+    dashboardRef.current =
+      dashboard;
+  }, [dashboard]);
 
-      if (startTimeoutRef.current) {
-        clearTimeout(startTimeoutRef.current);
-        startTimeoutRef.current = null;
-      }
+  /* =========================================================
+     LOAD DRIVER DASHBOARD
+  ========================================================= */
 
-      if (gpsRetryTimeoutRef.current) {
-        clearTimeout(gpsRetryTimeoutRef.current);
-        gpsRetryTimeoutRef.current = null;
-      }
-
-      if (socketRef.current) {
-        socketRef.current.removeAllListeners();
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-    };
-  }, []);
-
-  async function loadDashboard() {
-    try {
-      setLoading(true);
-      setError("");
-
-      const response = await fetch(
-        "/api/driver/dashboard",
-        {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            Accept: "application/json",
-          },
-        }
-      );
-
-      const data =
-        (await response.json()) as DashboardResponse;
-
-      if (!response.ok || !data.success) {
-        setError(
-          data.message ||
-            "Driver dashboard-ஐ load செய்ய முடியவில்லை."
-        );
-
-        setLoading(false);
+  const loadDashboard = useCallback(
+    async () => {
+      if (!mountedRef.current) {
         return;
       }
 
-      setDriver(data.driver || null);
-
-      const loadedTrips =
-        Array.isArray(data.trips)
-          ? data.trips
-          : [];
-
-      setTrips(loadedTrips);
-
-      const runningTrip =
-        loadedTrips.find(
-          (trip) =>
-            trip.status === "RUNNING"
-        );
-
-      if (runningTrip) {
-        setSelectedTripId(
-          runningTrip.id
-        );
-
-        currentTripRef.current =
-          runningTrip;
-
-        setTracking(true);
-
-        await connectSocket();
-
-        await startGpsTracking(
-          runningTrip
-        );
-      }
-
-      setLoading(false);
-    } catch (err) {
-      console.error(
-        "DRIVER_DASHBOARD_ERROR:",
-        err
-      );
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Dashboard load failed."
-      );
-
-      setLoading(false);
-    }
-  }
-
-  /*
-   * ==========================================================
-   * SOCKET.IO
-   * ==========================================================
-   */
-
-  async function connectSocket(): Promise<Socket> {
-    if (
-      socketRef.current?.connected
-    ) {
-      return socketRef.current;
-    }
-
-    const tokenResponse =
-      await fetch(
-        "/api/auth/socket-token",
-        {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            Accept: "application/json",
-          },
-        }
-      );
-
-    const tokenData =
-      (await tokenResponse.json()) as SocketTokenResponse;
-
-    if (
-      !tokenResponse.ok ||
-      !tokenData.success ||
-      !tokenData.token
-    ) {
-      throw new Error(
-        tokenData.message ||
-          "Socket authentication token கிடைக்கவில்லை."
-      );
-    }
-
-    const socket =
-      io("http://127.0.0.1:4001", {
-        auth: {
-          token: tokenData.token,
-        },
-        transports: [
-          "polling",
-          "websocket",
-        ],
-        withCredentials: true,
-        reconnection: true,
-        reconnectionAttempts: 10,
-        reconnectionDelay: 1000,
-      });
-
-    socketRef.current = socket;
-
-    socket.on(
-      "connect",
-      () => {
-        console.log(
-          "[DRIVER SOCKET] Connected:",
-          socket.id
-        );
-
-        setSocketConnected(true);
+      try {
         setError("");
-      }
-    );
 
-    socket.on(
-      "disconnect",
-      (reason) => {
-        console.log(
-          "[DRIVER SOCKET] Disconnected:",
-          reason
+        const response = await fetch(
+          "/api/driver/dashboard",
+          {
+            method: "GET",
+            credentials: "include",
+            cache: "no-store",
+            headers: {
+              "Cache-Control": "no-cache",
+            },
+          },
         );
 
-        setSocketConnected(false);
-      }
-    );
+        const result =
+          await response.json();
 
-    socket.on(
-      "connect_error",
-      (socketError) => {
+        if (
+          response.status === 401 ||
+          response.status === 403
+        ) {
+          window.location.href =
+            "/driver/login";
+
+          return;
+        }
+
+        if (
+          !response.ok ||
+          !result?.success
+        ) {
+          throw new Error(
+            result?.message ||
+              "Unable to load driver dashboard.",
+          );
+        }
+
+        if (!mountedRef.current) {
+          return;
+        }
+
+        const normalized =
+          normalizeDashboardResponse(
+            result,
+          );
+
+        dashboardRef.current =
+          normalized;
+
+        setDashboard(
+          normalized,
+        );
+
+        const defaultTrip =
+          normalized.activeTrip ??
+          normalized.runningTrip ??
+          normalized.trips?.find(
+            (trip) =>
+              trip.status === "RUNNING",
+          ) ??
+          normalized.trips?.[0] ??
+          null;
+
+        if (
+          defaultTrip &&
+          !selectedTripIdRef.current
+        ) {
+          const id =
+            defaultTrip.tripId ??
+            defaultTrip.id ??
+            "";
+
+          setSelectedTripId(id);
+
+          selectedTripIdRef.current =
+            id;
+        }
+      } catch (error) {
         console.error(
-          "[DRIVER SOCKET] Connection error:",
-          socketError
+          "DRIVER_DASHBOARD_LOAD_ERROR:",
+          error,
         );
 
-        setSocketConnected(false);
+        if (!mountedRef.current) {
+          return;
+        }
 
         setError(
-          `Realtime connection failed: ${socketError.message}`
+          error instanceof Error
+            ? error.message
+            : "Unable to load dashboard.",
         );
-      }
-    );
-
-    socket.on(
-      "connection:ready",
-      (data) => {
-        console.log(
-          "[DRIVER SOCKET] Ready:",
-          data
-        );
-
-        setSocketConnected(true);
-      }
-    );
-
-    socket.on(
-      "tracking:error",
-      (data) => {
-        console.error(
-          "[DRIVER SOCKET] Tracking error:",
-          data
-        );
-
-        if (data?.message) {
-          setError(data.message);
+      } finally {
+        if (mountedRef.current) {
+          setLoading(false);
         }
-
-        setStarting(false);
       }
-    );
+    },
+    [],
+  );
 
-    socket.on(
-      "driver:location:success",
-      (data) => {
-        console.log(
-          "[GPS SUCCESS]",
-          data
-        );
-      }
-    );
+  /* =========================================================
+     FETCH SOCKET TOKEN
+  ========================================================= */
 
-    if (!socket.connected) {
-      await new Promise<void>(
-        (resolve, reject) => {
-          const timeout =
-            setTimeout(() => {
-              reject(
-                new Error(
-                  "Realtime server connection timeout."
-                )
-              );
-            }, 10000);
-
-          socket.once(
-            "connect",
-            () => {
-              clearTimeout(timeout);
-              resolve();
-            }
-          );
-
-          socket.once(
-            "connect_error",
-            (err) => {
-              clearTimeout(timeout);
-              reject(err);
-            }
-          );
-        }
-      );
-    }
-
-    return socket;
-  }
-
-  /*
-   * ==========================================================
-   * START TRIP
-   * ==========================================================
-   */
-
-  async function startTrip() {
-    const trip =
-      trips.find(
-        (item) =>
-          item.id ===
-          selectedTripId
-      );
-
-    if (!trip) {
-      setError(
-        "முதலில் ஒரு பயணத்தை தேர்வு செய்யுங்கள்."
-      );
-
-      return;
-    }
-
-    if (
-      trip.status === "RUNNING"
-    ) {
-      currentTripRef.current =
-        trip;
-
-      setTracking(true);
-
-      await startGpsTracking(
-        trip
-      );
-
-      return;
-    }
-
-    if (
-      trip.status !== "SCHEDULED"
-    ) {
-      setError(
-        `இந்த trip தற்போது ${trip.status} நிலையில் உள்ளது.`
-      );
-
-      return;
-    }
-
-    try {
-      setStarting(true);
-      setError("");
-      setMessage("");
-
-      const socket =
-        await connectSocket();
-
-      const response =
-        await new Promise<StartTripResponse>(
-          (resolve) => {
-            let completed = false;
-
-            const finish = (
-              result: StartTripResponse
-            ) => {
-              if (completed) {
-                return;
-              }
-
-              completed = true;
-
-              if (
-                startTimeoutRef.current
-              ) {
-                clearTimeout(
-                  startTimeoutRef.current
-                );
-
-                startTimeoutRef.current =
-                  null;
-              }
-
-              resolve(result);
-            };
-
-            socket.emit(
-              "driver:start-trip",
-              {
-                tripId:
-                  trip.tripId,
+  const getSocketToken =
+    useCallback(async () => {
+      try {
+        const response =
+          await fetch(
+            "/api/auth/socket-token",
+            {
+              method: "GET",
+              credentials: "include",
+              cache: "no-store",
+              headers: {
+                "Cache-Control": "no-cache",
               },
-              (
-                ackResponse: StartTripResponse
-              ) => {
-                console.log(
-                  "[START TRIP ACK]",
-                  ackResponse
-                );
+            },
+          );
 
-                finish(
-                  ackResponse || {
-                    success: false,
-                    message:
-                      "Empty server response.",
-                  }
-                );
-              }
-            );
+        const result =
+          await response.json();
 
-            startTimeoutRef.current =
-              setTimeout(() => {
-                finish({
-                  success: false,
-                  message:
-                    "Server-ல் இருந்து response வரவில்லை.",
-                });
-              }, 10000);
-          }
+        if (
+          response.status === 401 ||
+          response.status === 403
+        ) {
+          window.location.href =
+            "/driver/login";
+
+          return null;
+        }
+
+        if (
+          !response.ok ||
+          !result?.success
+        ) {
+          throw new Error(
+            result?.message ||
+              "Unable to create socket token.",
+          );
+        }
+
+        const token =
+          result?.token ??
+          result?.accessToken ??
+          result?.data?.token ??
+          null;
+
+        if (
+          typeof token !== "string" ||
+          !token
+        ) {
+          throw new Error(
+            "Socket token was not returned by the server.",
+          );
+        }
+
+        socketTokenRef.current =
+          token;
+
+        console.log(
+          "[SOCKET TOKEN] Fresh token created.",
         );
 
-      console.log(
-        "[START TRIP RESPONSE]",
-        response
-      );
-
-      if (
-        !response?.success
-      ) {
-        setError(
-          response?.message ||
-            "பயணத்தை தொடங்க முடியவில்லை."
+        return token;
+      } catch (error) {
+        console.error(
+          "SOCKET_TOKEN_ERROR:",
+          error,
         );
 
-        setStarting(false);
+        if (mountedRef.current) {
+          setSocketStatus(
+            "TOKEN ERROR",
+          );
 
-        return;
+          setError(
+            error instanceof Error
+              ? error.message
+              : "Unable to connect realtime tracking.",
+          );
+        }
+
+        return null;
       }
+    }, []);
 
-      const updatedTrip: Trip = {
-        ...trip,
-        status: "RUNNING",
-      };
+  /* =========================================================
+     STOP GPS
+  ========================================================= */
 
-      currentTripRef.current =
-        updatedTrip;
-
-      setTrips(
-        (previous) =>
-          previous.map(
-            (item) =>
-              item.id === trip.id
-                ? updatedTrip
-                : item
-          )
-      );
-
-      setSelectedTripId(
-        trip.id
-      );
-
-      setMessage(
-        "பயணம் தொடங்கப்பட்டது. GPS கண்காணிப்பு ஆரம்பமாகிறது."
-      );
-
-      setStarting(false);
-      setTracking(true);
-
-      await startGpsTracking(
-        updatedTrip
-      );
-    } catch (err) {
-      console.error(
-        "START_TRIP_CLIENT_ERROR:",
-        err
-      );
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "பயணத்தை தொடங்க முடியவில்லை."
-      );
-
-      setStarting(false);
-    }
-  }
-
-  /*
-   * ==========================================================
-   * GPS STATUS
-   * ==========================================================
-   */
-
-  function getGpsStatus(
-    gpsAccuracy: number | null
-  ): GpsStatus {
-    if (gpsAccuracy === null) {
-      return "SEARCHING";
-    }
-
-    if (gpsAccuracy <= 50) {
-      return "GOOD";
-    }
-
-    if (gpsAccuracy <= 200) {
-      return "FAIR";
-    }
-
-    return "POOR";
-  }
-
-  function getGpsStatusText() {
-    switch (gpsStatus) {
-      case "GOOD":
-        return "Good GPS";
-
-      case "FAIR":
-        return "Fair GPS";
-
-      case "POOR":
-        return "Poor GPS";
-
-      case "SEARCHING":
-        return "Searching GPS...";
-
-      default:
-        return "GPS Offline";
-    }
-  }
-
-  function getGpsStatusClasses() {
-    switch (gpsStatus) {
-      case "GOOD":
-        return {
-          box: "border-emerald-200 bg-emerald-50",
-          dot: "bg-emerald-500",
-          text: "text-emerald-700",
-        };
-
-      case "FAIR":
-        return {
-          box: "border-amber-200 bg-amber-50",
-          dot: "bg-amber-500",
-          text: "text-amber-700",
-        };
-
-      case "POOR":
-        return {
-          box: "border-red-200 bg-red-50",
-          dot: "bg-red-500",
-          text: "text-red-700",
-        };
-
-      case "SEARCHING":
-        return {
-          box: "border-blue-200 bg-blue-50",
-          dot: "bg-blue-500",
-          text: "text-blue-700",
-        };
-
-      default:
-        return {
-          box: "border-slate-200 bg-slate-50",
-          dot: "bg-slate-400",
-          text: "text-slate-600",
-        };
-    }
-  }
-
-  /*
-   * ==========================================================
-   * GPS TRACKING
-   * ==========================================================
-   */
-
-  async function startGpsTracking(
-    trip: Trip
-  ) {
-    if (
-      !navigator.geolocation
-    ) {
-      setError(
-        "இந்த browser GPS location-ஐ support செய்யவில்லை."
-      );
-
-      setGpsStatus("OFFLINE");
-      setTracking(false);
-
-      return;
-    }
-
-    try {
-      const socket =
-        await connectSocket();
-
-      if (!socket.connected) {
-        setError(
-          "Realtime server connected இல்லை."
-        );
-
-        setGpsStatus("OFFLINE");
-        setTracking(false);
-
-        return;
-      }
-
-      currentTripRef.current =
-        trip;
-
-      setTracking(true);
-      setGpsStatus("SEARCHING");
-
-      setError("");
-
-      /*
-       * Clear old watcher.
-       */
+  const stopGPS =
+    useCallback(() => {
       if (
+        typeof navigator !==
+          "undefined" &&
+        navigator.geolocation &&
         watchIdRef.current !== null
       ) {
-        navigator.geolocation.clearWatch(
-          watchIdRef.current
-        );
+        try {
+          navigator.geolocation.clearWatch(
+            watchIdRef.current,
+          );
+        } catch {
+          // ignore cleanup errors
+        }
 
         watchIdRef.current =
           null;
       }
 
-      /*
-       * Clear pending retry.
-       */
       if (
-        gpsRetryTimeoutRef.current
+        gpsIntervalRef.current
       ) {
-        clearTimeout(
-          gpsRetryTimeoutRef.current
+        clearInterval(
+          gpsIntervalRef.current,
         );
 
-        gpsRetryTimeoutRef.current =
+        gpsIntervalRef.current =
           null;
       }
 
-      /*
-       * Request browser/device GPS.
-       */
-      const watchId =
-        navigator.geolocation.watchPosition(
-          (position) => {
-            const {
+      if (
+        gpsRestartTimerRef.current
+      ) {
+        clearTimeout(
+          gpsRestartTimerRef.current,
+        );
+
+        gpsRestartTimerRef.current =
+          null;
+      }
+
+      startingGPSRef.current =
+        false;
+
+      console.log(
+        "[GPS] GPS watcher stopped.",
+      );
+    }, []);
+
+  /* =========================================================
+     SEND GPS LOCATION
+  ========================================================= */
+
+  const sendGPSLocation =
+    useCallback(
+      async (
+        location: GPSLocation,
+      ) => {
+        latestGPSRef.current =
+          location;
+
+        if (!mountedRef.current) {
+          return;
+        }
+
+        if (!isValidCoordinate(
+          location.latitude,
+          location.longitude,
+        )) {
+          console.error(
+            "[GPS] Invalid coordinates:",
+            location,
+          );
+
+          setGpsError(
+            "GPS coordinates are invalid.",
+          );
+
+          return;
+        }
+
+        if (
+          !Number.isFinite(
+            location.accuracy,
+          ) ||
+          location.accuracy <= 0
+        ) {
+          console.warn(
+            "[GPS] Invalid accuracy:",
+            location.accuracy,
+          );
+
+          setGpsError(
+            "GPS accuracy value is invalid.",
+          );
+
+          return;
+        }
+
+        if (
+          location.accuracy >
+          GPS_MAX_ACCURACY
+        ) {
+          console.warn(
+            "[GPS] Accuracy too poor:",
+            location.accuracy,
+          );
+
+          setGpsStatus(
+            `Poor GPS (${Math.round(
+              location.accuracy,
+            )}m)`,
+          );
+
+          setGpsError(
+            "GPS accuracy is too poor. Waiting for a better signal.",
+          );
+
+          return;
+        }
+
+        setGpsError("");
+
+        setGpsLocation(
+          location,
+        );
+
+        const recordedAt =
+          location.recordedAt ??
+          new Date().toISOString();
+
+        setLastValidGPS(
+          recordedAt,
+        );
+
+        setGpsStatus(
+          `GPS ${gpsLevel(
+            location.accuracy,
+          )}`,
+        );
+
+        const socket =
+          socketRef.current;
+
+        /*
+         * Important:
+         *
+         * Do not emit when socket is missing,
+         * disconnected, closing or destroyed.
+         *
+         * latestGPSRef keeps the location so
+         * reconnectSocket() can resend it.
+         */
+        if (
+          !socket ||
+          !socket.connected
+        ) {
+          console.warn(
+            "[GPS] Socket unavailable. Latest GPS retained.",
+          );
+
+          setSendingGPS(false);
+
+          return;
+        }
+
+        if (
+          gpsSendingRef.current
+        ) {
+          console.log(
+            "[GPS] Previous send still processing. Latest GPS retained.",
+          );
+
+          return;
+        }
+
+        gpsSendingRef.current =
+          true;
+
+        setSendingGPS(true);
+
+        try {
+          socket.emit(
+            "driver:location",
+            {
               latitude:
-                currentLatitude,
+                location.latitude,
 
               longitude:
-                currentLongitude,
+                location.longitude,
 
               accuracy:
-                currentAccuracy,
+                location.accuracy,
 
               speed:
-                currentSpeed,
+                location.speed,
 
               heading:
-                currentHeading,
-            } = position.coords;
+                location.heading,
+            },
+          );
 
-            /*
-             * Validate coordinates.
-             */
-            if (
-              !Number.isFinite(
-                currentLatitude
-              ) ||
-              !Number.isFinite(
-                currentLongitude
-              ) ||
-              currentLatitude < -90 ||
-              currentLatitude > 90 ||
-              currentLongitude < -180 ||
-              currentLongitude > 180
-            ) {
-              console.warn(
-                "[GPS] Invalid coordinates:",
-                position.coords
-              );
+          console.log(
+            "[GPS] Valid location sent:",
+            {
+              latitude:
+                location.latitude,
 
-              setGpsStatus(
-                "SEARCHING"
-              );
+              longitude:
+                location.longitude,
 
-              return;
-            }
+              accuracy:
+                location.accuracy,
 
-            /*
-             * Accuracy.
-             */
-            const gpsAccuracy =
-              Number.isFinite(
-                currentAccuracy
-              ) &&
-              currentAccuracy >= 0
-                ? currentAccuracy
-                : null;
+              speed:
+                location.speed,
 
-            /*
-             * Speed m/s -> km/h.
-             */
-            const speedKmh =
-              currentSpeed != null &&
-              Number.isFinite(
-                currentSpeed
-              ) &&
-              currentSpeed >= 0
-                ? currentSpeed * 3.6
-                : null;
+              heading:
+                location.heading,
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[GPS] Socket emit failed:",
+            error,
+          );
+        } finally {
+          gpsSendingRef.current =
+            false;
 
-            /*
-             * Heading.
-             */
-            const validHeading =
-              currentHeading != null &&
-              Number.isFinite(
-                currentHeading
-              ) &&
-              currentHeading >= 0 &&
-              currentHeading <= 360
-                ? currentHeading
-                : null;
-
-            /*
-             * Always show current accuracy.
-             */
-            setAccuracy(
-              gpsAccuracy
-            );
-
-            /*
-             * --------------------------------------------------
-             * Reject extremely inaccurate readings.
-             *
-             * Example:
-             * 50000m = 50km
-             *
-             * Do NOT send this coordinate.
-             * --------------------------------------------------
-             */
-            if (
-              gpsAccuracy !== null &&
-              gpsAccuracy > 1000
-            ) {
-              console.warn(
-                `[GPS] Poor accuracy: ${gpsAccuracy.toFixed(
-                  1
-                )}m`
-              );
-
-              setGpsStatus(
-                "POOR"
-              );
-
-              setError(
-                `GPS accuracy மிகவும் குறைவாக உள்ளது (${gpsAccuracy.toFixed(
-                  0
-                )}m). Mobile GPS signal-க்காக காத்திருக்கிறது.`
-              );
-
-              return;
-            }
-
-            /*
-             * Valid GPS reading.
-             */
-            lastValidPositionRef.current =
-              position;
-
-            setLatitude(
-              currentLatitude
-            );
-
-            setLongitude(
-              currentLongitude
-            );
-
-            setSpeed(
-              speedKmh
-            );
-
-            setHeading(
-              validHeading
-            );
-
-            setAccuracy(
-              gpsAccuracy
-            );
-
-            setGpsStatus(
-              getGpsStatus(
-                gpsAccuracy
-              )
-            );
-
-            setLastGpsTime(
-              new Date()
-            );
-
-            /*
-             * Remove old poor GPS error.
-             */
-            setError(
-              (previous) =>
-                previous.startsWith(
-                  "GPS accuracy மிகவும் குறைவாக உள்ளது"
-                )
-                  ? ""
-                  : previous
-            );
-
-            /*
-             * Send realtime location.
-             */
-            socket.emit(
-              "driver:location",
-              {
-                latitude:
-                  currentLatitude,
-
-                longitude:
-                  currentLongitude,
-
-                accuracy:
-                  gpsAccuracy,
-
-                speed:
-                  speedKmh,
-
-                heading:
-                  validHeading,
-              }
-            );
-
-            console.log(
-              "[GPS] Valid location sent:",
-              {
-                latitude:
-                  currentLatitude,
-
-                longitude:
-                  currentLongitude,
-
-                accuracy:
-                  gpsAccuracy,
-
-                speed:
-                  speedKmh,
-
-                heading:
-                  validHeading,
-              }
-            );
-          },
-
-          /*
-           * GPS ERROR
-           */
-          (geoError) => {
-            console.error(
-              "[GPS ERROR]",
-              geoError
-            );
-
-            if (
-              geoError.code ===
-              geoError.PERMISSION_DENIED
-            ) {
-              setGpsStatus(
-                "OFFLINE"
-              );
-
-              setError(
-                "GPS permission மறுக்கப்பட்டுள்ளது. Browser-ல் Location permission-ஐ Allow செய்யுங்கள்."
-              );
-
-              return;
-            }
-
-            if (
-              geoError.code ===
-              geoError.POSITION_UNAVAILABLE
-            ) {
-              setGpsStatus(
-                "SEARCHING"
-              );
-
-              setError(
-                "GPS signal கிடைக்கவில்லை. Mobile Location/GPS ON செய்து open area-ல் முயற்சி செய்யுங்கள்."
-              );
-
-              return;
-            }
-
-            if (
-              geoError.code ===
-              geoError.TIMEOUT
-            ) {
-              setGpsStatus(
-                "SEARCHING"
-              );
-
-              setError(
-                "GPS reading பெற timeout ஏற்பட்டது. மீண்டும் முயற்சிக்கிறது..."
-              );
-
-              return;
-            }
-
-            setGpsStatus(
-              "SEARCHING"
-            );
-
-            setError(
-              "GPS location கிடைக்கவில்லை. மீண்டும் முயற்சிக்கிறது..."
-            );
-          },
-
-          /*
-           * GPS OPTIONS
-           */
-          {
-            enableHighAccuracy: true,
-            maximumAge: 0,
-            timeout: 30000,
+          if (mountedRef.current) {
+            setSendingGPS(false);
           }
-        );
+        }
+      },
+      [],
+    );
 
-      watchIdRef.current =
-        watchId;
-    } catch (err) {
-      console.error(
-        "START_GPS_ERROR:",
-        err
-      );
+  /* =========================================================
+     RESEND LATEST GPS
+  ========================================================= */
 
-      setGpsStatus("OFFLINE");
-      setTracking(false);
+  const resendLatestGPS =
+    useCallback(() => {
+      if (
+        !mountedRef.current ||
+        !pageActiveRef.current
+      ) {
+        return;
+      }
 
-      setError(
-        err instanceof Error
-          ? err.message
-          : "GPS tracking start செய்ய முடியவில்லை."
-      );
-    }
-  }
-
-  /*
-   * ==========================================================
-   * STOP GPS
-   * ==========================================================
-   */
-
-  function stopGpsTracking() {
-    if (
-      watchIdRef.current !== null
-    ) {
-      navigator.geolocation?.clearWatch(
-        watchIdRef.current
-      );
-
-      watchIdRef.current =
-        null;
-    }
-
-    if (
-      gpsRetryTimeoutRef.current
-    ) {
-      clearTimeout(
-        gpsRetryTimeoutRef.current
-      );
-
-      gpsRetryTimeoutRef.current =
-        null;
-    }
-
-    setTracking(false);
-    setGpsStatus("OFFLINE");
-  }
-
-  /*
-   * ==========================================================
-   * STOP TRIP
-   * ==========================================================
-   */
-
-  async function stopTrip() {
-    const trip =
-      currentTripRef.current;
-
-    if (!trip) {
-      setError(
-        "Running trip இல்லை."
-      );
-
-      return;
-    }
-
-    try {
-      setStarting(true);
-      setError("");
-      setMessage("");
-
-      stopGpsTracking();
+      const latest =
+        latestGPSRef.current;
 
       const socket =
-        await connectSocket();
-
-      const response =
-        await new Promise<StopTripResponse>(
-          (resolve) => {
-            let completed = false;
-
-            const finish = (
-              result: StopTripResponse
-            ) => {
-              if (completed) {
-                return;
-              }
-
-              completed = true;
-
-              resolve(result);
-            };
-
-            socket.emit(
-              "driver:stop-trip",
-              {
-                tripId:
-                  trip.tripId,
-              },
-              (
-                ackResponse: StopTripResponse
-              ) => {
-                console.log(
-                  "[STOP TRIP ACK]",
-                  ackResponse
-                );
-
-                finish(
-                  ackResponse || {
-                    success: false,
-                    message:
-                      "Empty server response.",
-                  }
-                );
-              }
-            );
-
-            setTimeout(() => {
-              finish({
-                success: false,
-                message:
-                  "Server response timeout.",
-              });
-            }, 10000);
-          }
-        );
+        socketRef.current;
 
       if (
-        !response?.success
+        !latest ||
+        !socket ||
+        !socket.connected
       ) {
-        setError(
-          response?.message ||
-            "பயணத்தை நிறுத்த முடியவில்லை."
+        return;
+      }
+
+      console.log(
+        "[GPS] Socket connected. Resending latest GPS...",
+      );
+
+      void sendGPSLocation(
+        latest,
+      );
+    }, [
+      sendGPSLocation,
+    ]);
+
+  /* =========================================================
+     GPS SUCCESS
+  ========================================================= */
+
+  const handleGPSSuccess =
+    useCallback(
+      (
+        position: GeolocationPosition,
+      ) => {
+        if (
+          !mountedRef.current ||
+          !pageActiveRef.current
+        ) {
+          return;
+        }
+
+        const latitude =
+          position.coords.latitude;
+
+        const longitude =
+          position.coords.longitude;
+
+        const accuracy =
+          position.coords.accuracy;
+
+        const speed =
+          Number.isFinite(
+            position.coords.speed,
+          )
+            ? position.coords.speed
+            : null;
+
+        const heading =
+          Number.isFinite(
+            position.coords.heading,
+          )
+            ? position.coords.heading
+            : null;
+
+        const location: GPSLocation =
+          {
+            latitude,
+            longitude,
+            accuracy,
+            speed,
+            heading,
+            recordedAt:
+              new Date().toISOString(),
+          };
+
+        void sendGPSLocation(
+          location,
+        );
+      },
+      [sendGPSLocation],
+    );
+
+  /* =========================================================
+     GPS ERROR
+  ========================================================= */
+
+  const handleGPSError =
+    useCallback(
+      (
+        error: GeolocationPositionError,
+      ) => {
+        if (
+          !mountedRef.current ||
+          !pageActiveRef.current
+        ) {
+          return;
+        }
+
+        console.error(
+          "[GPS ERROR]",
+          {
+            code: error.code,
+            message:
+              error.message,
+          },
         );
 
-        setStarting(false);
+        if (
+          error.code ===
+          error.PERMISSION_DENIED
+        ) {
+          setGpsStatus(
+            "Permission denied",
+          );
+
+          setGpsError(
+            "Browser location permission is denied. Please allow Location access for 127.0.0.1.",
+          );
+
+          return;
+        }
+
+        if (
+          error.code ===
+          error.POSITION_UNAVAILABLE
+        ) {
+          setGpsStatus(
+            "GPS unavailable",
+          );
+
+          setGpsError(
+            "GPS position is currently unavailable. Retrying...",
+          );
+
+          return;
+        }
+
+        if (
+          error.code ===
+          error.TIMEOUT
+        ) {
+          setGpsStatus(
+            "GPS timeout",
+          );
+
+          setGpsError(
+            "GPS request timed out. Retrying...",
+          );
+
+          return;
+        }
+
+        setGpsStatus(
+          "GPS error",
+        );
+
+        setGpsError(
+          error.message ||
+            "Unable to read GPS location.",
+        );
+      },
+      [],
+    );
+
+  /* =========================================================
+     START GPS WATCHER
+  ========================================================= */
+
+  const startGPS =
+    useCallback(() => {
+      if (
+        !mountedRef.current ||
+        !pageActiveRef.current
+      ) {
+        return;
+      }
+
+      if (
+        typeof navigator ===
+          "undefined" ||
+        !navigator.geolocation
+      ) {
+        setGpsStatus(
+          "GPS unsupported",
+        );
+
+        setGpsError(
+          "This browser does not support geolocation.",
+        );
 
         return;
       }
 
-      setMessage(
-        "பயணம் நிறுத்தப்பட்டது."
-      );
-
-      setTrips(
-        (previous) =>
-          previous.map(
-            (item) =>
-              item.id === trip.id
-                ? {
-                    ...item,
-                    status:
-                      "COMPLETED",
-                  }
-                : item
-          )
-      );
-
-      currentTripRef.current =
+      const currentTrip =
+        dashboardRef.current?.activeTrip ??
+        dashboardRef.current?.runningTrip ??
+        dashboardRef.current?.trips?.find(
+          (trip) =>
+            (
+              trip.tripId ??
+              trip.id
+            ) ===
+            selectedTripIdRef.current,
+        ) ??
         null;
 
-      setSelectedTripId("");
+      /*
+       * Only track GPS while a trip is RUNNING.
+       */
+      if (
+        !currentTrip ||
+        currentTrip.status !==
+          "RUNNING"
+      ) {
+        console.log(
+          "[GPS] Not starting watcher because selected trip is not RUNNING.",
+        );
 
-      setLatitude(null);
-      setLongitude(null);
-      setSpeed(null);
-      setAccuracy(null);
-      setHeading(null);
-      setLastGpsTime(null);
-      setGpsStatus("OFFLINE");
+        return;
+      }
 
-      setStarting(false);
-      setTracking(false);
-    } catch (err) {
-      console.error(
-        "STOP_TRIP_CLIENT_ERROR:",
-        err
+      /*
+       * Prevent duplicate GPS watcher.
+       */
+      if (
+        startingGPSRef.current
+      ) {
+        return;
+      }
+
+      if (
+        watchIdRef.current !== null
+      ) {
+        /*
+         * Watcher already active.
+         *
+         * Do not create another one.
+         */
+        return;
+      }
+
+      startingGPSRef.current =
+        true;
+
+      setGpsStatus(
+        "Searching GPS...",
       );
 
-      setError(
-        err instanceof Error
-          ? err.message
-          : "பயணத்தை நிறுத்த முடியவில்லை."
+      setGpsError("");
+
+      console.log(
+        "[GPS] Starting GPS watcher...",
       );
 
-      setStarting(false);
+      try {
+        const watchId =
+          navigator.geolocation.watchPosition(
+            handleGPSSuccess,
+            handleGPSError,
+            GPS_OPTIONS,
+          );
+
+        watchIdRef.current =
+          watchId;
+
+        /*
+         * Fresh GPS every 15 seconds.
+         */
+        gpsIntervalRef.current =
+          setInterval(() => {
+            if (
+              !mountedRef.current ||
+              !pageActiveRef.current
+            ) {
+              return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+              handleGPSSuccess,
+              handleGPSError,
+              GPS_OPTIONS,
+            );
+          }, GPS_REFRESH_INTERVAL);
+
+        /*
+         * Immediate GPS request.
+         */
+        navigator.geolocation.getCurrentPosition(
+          handleGPSSuccess,
+          handleGPSError,
+          GPS_OPTIONS,
+        );
+
+        console.log(
+          "[GPS] Watcher ACTIVE:",
+          watchId,
+        );
+      } catch (error) {
+        console.error(
+          "[GPS] Unable to start watcher:",
+          error,
+        );
+
+        watchIdRef.current =
+          null;
+
+        setGpsStatus(
+          "GPS error",
+        );
+
+        setGpsError(
+          "Unable to start GPS tracking.",
+        );
+      } finally {
+        startingGPSRef.current =
+          false;
+      }
+    }, [
+      handleGPSError,
+      handleGPSSuccess,
+    ]);
+
+  /* =========================================================
+     DISCONNECT SOCKET SAFELY
+  ========================================================= */
+
+  const disconnectSocket =
+    useCallback(
+      (
+        reason = "manual",
+      ) => {
+        const socket =
+          socketRef.current;
+
+        if (!socket) {
+          return;
+        }
+
+        console.log(
+          `[DRIVER SOCKET] Disconnecting: ${reason}`,
+        );
+
+        try {
+          socket.removeAllListeners();
+
+          socket.io.removeAllListeners();
+
+          if (
+            socket.connected ||
+            socket.active
+          ) {
+            socket.disconnect();
+          }
+        } catch (error) {
+          console.warn(
+            "[DRIVER SOCKET] Cleanup warning:",
+            error,
+          );
+        }
+
+        socketRef.current =
+          null;
+
+        if (mountedRef.current) {
+          setSocketConnected(
+            false,
+          );
+
+          setSocketStatus(
+            "DISCONNECTED",
+          );
+        }
+      },
+      [],
+    );
+
+  /* =========================================================
+     CREATE SOCKET
+  ========================================================= */
+
+  const connectSocket =
+    useCallback(
+      async (
+        forceNew = false,
+      ) => {
+        if (
+          !mountedRef.current ||
+          !pageActiveRef.current
+        ) {
+          return;
+        }
+
+        if (
+          connectingRef.current
+        ) {
+          return;
+        }
+
+        const existing =
+          socketRef.current;
+
+        /*
+         * Existing healthy connection.
+         */
+        if (
+          !forceNew &&
+          existing &&
+          existing.connected
+        ) {
+          setSocketConnected(
+            true,
+          );
+
+          setSocketStatus(
+            "ONLINE",
+          );
+
+          resendLatestGPS();
+
+          return;
+        }
+
+        connectingRef.current =
+          true;
+
+        setSocketStatus(
+          "CONNECTING",
+        );
+
+        try {
+          let token =
+            socketTokenRef.current;
+
+          /*
+           * Always request a fresh token when
+           * forceNew is true.
+           */
+          if (
+            forceNew ||
+            !token
+          ) {
+            token =
+              await getSocketToken();
+          }
+
+          if (
+            !token ||
+            !mountedRef.current
+          ) {
+            return;
+          }
+
+          /*
+           * Remove old socket before creating
+           * a completely fresh connection.
+           */
+          if (
+            socketRef.current
+          ) {
+            try {
+              socketRef.current.removeAllListeners();
+
+              socketRef.current.io.removeAllListeners();
+
+              socketRef.current.disconnect();
+            } catch {
+              // ignore cleanup error
+            }
+
+            socketRef.current =
+              null;
+          }
+
+          const socket =
+            io(SOCKET_URL, {
+              transports: [
+                "websocket",
+                "polling",
+              ],
+
+              auth: {
+                token,
+              },
+
+              withCredentials:
+                true,
+
+              autoConnect:
+                true,
+
+              reconnection:
+                true,
+
+              reconnectionAttempts:
+                Infinity,
+
+              reconnectionDelay:
+                SOCKET_RECONNECT_DELAY,
+
+              reconnectionDelayMax:
+                SOCKET_RECONNECT_DELAY_MAX,
+
+              timeout: 10_000,
+            });
+
+          socketRef.current =
+            socket;
+
+          socket.on(
+            "connect",
+            () => {
+              if (
+                !mountedRef.current ||
+                socketRef.current !==
+                  socket
+              ) {
+                return;
+              }
+
+              console.log(
+                "[DRIVER SOCKET] Connected:",
+                socket.id,
+              );
+
+              setSocketConnected(
+                true,
+              );
+
+              setSocketStatus(
+                "ONLINE",
+              );
+
+              setError("");
+
+              /*
+               * Immediately send latest GPS.
+               */
+              window.setTimeout(() => {
+                if (
+                  mountedRef.current &&
+                  pageActiveRef.current &&
+                  socketRef.current ===
+                    socket &&
+                  socket.connected
+                ) {
+                  resendLatestGPS();
+                }
+              }, 150);
+            },
+          );
+
+          socket.on(
+            "disconnect",
+            (reason) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.warn(
+                "[DRIVER SOCKET] Disconnected:",
+                reason,
+              );
+
+              setSocketConnected(
+                false,
+              );
+
+              if (
+                pageActiveRef.current
+              ) {
+                setSocketStatus(
+                  "RECONNECTING",
+                );
+              }
+
+              /*
+               * IMPORTANT:
+               *
+               * GPS watcher is NOT stopped.
+               *
+               * Latest GPS stays in latestGPSRef.
+               */
+            },
+          );
+
+          socket.on(
+            "connect_error",
+            (error) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.error(
+                "[DRIVER SOCKET] Connect error:",
+                error,
+              );
+
+              setSocketConnected(
+                false,
+              );
+
+              setSocketStatus(
+                "RECONNECTING",
+              );
+
+              /*
+               * The old socket's token may be expired.
+               *
+               * Stop Socket.IO's automatic reconnect for
+               * this socket because it would keep using
+               * the old auth token.
+               */
+              socket.io.reconnection(false);
+
+              socketTokenRef.current =
+                null;
+
+              try {
+                socket.removeAllListeners();
+
+                socket.io.removeAllListeners();
+
+                socket.disconnect();
+              } catch {
+                // ignore
+              }
+
+              if (
+                socketRef.current ===
+                socket
+              ) {
+                socketRef.current =
+                  null;
+              }
+
+              /*
+               * Fresh token + fresh socket.
+               */
+              if (
+                mountedRef.current &&
+                pageActiveRef.current
+              ) {
+                if (
+                  socketReconnectTimerRef.current
+                ) {
+                  clearTimeout(
+                    socketReconnectTimerRef.current,
+                  );
+                }
+
+                socketReconnectTimerRef.current =
+                  window.setTimeout(() => {
+                    socketReconnectTimerRef.current =
+                      null;
+
+                    if (
+                      mountedRef.current &&
+                      pageActiveRef.current
+                    ) {
+                      void connectSocket(
+                        true,
+                      );
+                    }
+                  }, 1500);
+              }
+            },
+          );
+
+          socket.io.on(
+            "reconnect_attempt",
+            (attempt) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.log(
+                "[DRIVER SOCKET] Reconnect attempt:",
+                attempt,
+              );
+
+              setSocketStatus(
+                `RECONNECTING ${attempt}`,
+              );
+            },
+          );
+
+          socket.io.on(
+            "reconnect",
+            (attempt) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.log(
+                "[DRIVER SOCKET] Reconnected:",
+                attempt,
+              );
+
+              setSocketConnected(
+                true,
+              );
+
+              setSocketStatus(
+                "ONLINE",
+              );
+
+              window.setTimeout(() => {
+                if (
+                  mountedRef.current &&
+                  socket.connected
+                ) {
+                  resendLatestGPS();
+                }
+              }, 150);
+            },
+          );
+
+          socket.io.on(
+            "reconnect_error",
+            (error) => {
+              console.error(
+                "[DRIVER SOCKET] Reconnect error:",
+                error,
+              );
+            },
+          );
+
+          socket.on(
+            "driver:location:success",
+            (
+              result: SocketLocationSuccess,
+            ) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.log(
+                "[GPS SUCCESS]",
+                result,
+              );
+
+              if (
+                result?.recordedAt
+              ) {
+                setLastSocketSuccess(
+                  result.recordedAt,
+                );
+              }
+
+              setGpsError("");
+            },
+          );
+
+          socket.on(
+            "tracking:error",
+            (
+              result: TrackingError,
+            ) => {
+              if (
+                socketRef.current !==
+                socket
+              ) {
+                return;
+              }
+
+              console.error(
+                "[TRACKING ERROR]",
+                result,
+              );
+
+              if (
+                result?.message
+              ) {
+                setError(
+                  result.message,
+                );
+              }
+            },
+          );
+
+          socket.on(
+            "trip:started",
+            (payload: any) => {
+              console.log(
+                "[TRIP STARTED EVENT]",
+                payload,
+              );
+
+              setMessage(
+                "Trip started successfully.",
+              );
+
+              void loadDashboard();
+
+              window.setTimeout(() => {
+                if (
+                  mountedRef.current
+                ) {
+                  setMessage("");
+                }
+              }, 3000);
+            },
+          );
+
+          socket.on(
+            "trip:completed",
+            (payload: any) => {
+              console.log(
+                "[TRIP COMPLETED EVENT]",
+                payload,
+              );
+
+              setMessage(
+                "Trip completed.",
+              );
+
+              stopGPS();
+
+              void loadDashboard();
+
+              window.setTimeout(() => {
+                if (
+                  mountedRef.current
+                ) {
+                  setMessage("");
+                }
+              }, 3000);
+            },
+          );
+        } catch (error) {
+          console.error(
+            "[DRIVER SOCKET] Setup error:",
+            error,
+          );
+
+          if (mountedRef.current) {
+            setSocketConnected(
+              false,
+            );
+
+            setSocketStatus(
+              "ERROR",
+            );
+          }
+        } finally {
+          connectingRef.current =
+            false;
+        }
+      },
+      [
+        getSocketToken,
+        loadDashboard,
+        resendLatestGPS,
+        stopGPS,
+      ],
+    );
+
+  /* =========================================================
+     START TRIP
+  ========================================================= */
+
+  const startTrip =
+    useCallback(async () => {
+      const tripId =
+        selectedTrip?.tripId ??
+        selectedTrip?.id ??
+        "";
+
+      if (!tripId) {
+        setError(
+          "Please select a trip first.",
+        );
+
+        return;
+      }
+
+      let socket =
+        socketRef.current;
+
+      if (
+        !socket ||
+        !socket.connected
+      ) {
+        setError(
+          "Realtime connection is reconnecting. Please wait a moment.",
+        );
+
+        await connectSocket();
+
+        socket =
+          socketRef.current;
+
+        if (
+          !socket ||
+          !socket.connected
+        ) {
+          return;
+        }
+      }
+
+      setStartingTrip(true);
+      setError("");
+      setMessage("");
+
+      try {
+        await new Promise<void>(
+          (resolve) => {
+            socket!.emit(
+              "driver:start-trip",
+              {
+                tripId,
+              },
+              (
+                response: any,
+              ) => {
+                console.log(
+                  "[START TRIP ACK]",
+                  response,
+                );
+
+                if (
+                  !response?.success
+                ) {
+                  setError(
+                    response?.message ||
+                      "Unable to start trip.",
+                  );
+
+                  resolve();
+                  return;
+                }
+
+                setMessage(
+                  "Trip started successfully.",
+                );
+
+                /*
+                 * Refresh dashboard first.
+                 */
+                void loadDashboard();
+
+                /*
+                 * Start GPS after server accepted
+                 * the trip.
+                 */
+                window.setTimeout(() => {
+                  if (
+                    mountedRef.current
+                  ) {
+                    startGPS();
+                  }
+                }, 500);
+
+                window.setTimeout(() => {
+                  if (
+                    mountedRef.current
+                  ) {
+                    setMessage("");
+                  }
+                }, 3000);
+
+                resolve();
+              },
+            );
+          },
+        );
+      } catch (error) {
+        console.error(
+          "START_TRIP_CLIENT_ERROR:",
+          error,
+        );
+
+        setError(
+          "Unable to start trip.",
+        );
+      } finally {
+        if (mountedRef.current) {
+          setStartingTrip(false);
+        }
+      }
+    }, [
+      connectSocket,
+      loadDashboard,
+      selectedTrip,
+      startGPS,
+    ]);
+
+  /* =========================================================
+     STOP TRIP
+  ========================================================= */
+
+  const stopTrip =
+    useCallback(async () => {
+      const tripId =
+        selectedTrip?.tripId ??
+        selectedTrip?.id ??
+        "";
+
+      if (!tripId) {
+        setError(
+          "No trip selected.",
+        );
+
+        return;
+      }
+
+      const confirmed =
+        window.confirm(
+          "Stop this trip now?",
+        );
+
+      if (!confirmed) {
+        return;
+      }
+
+      const socket =
+        socketRef.current;
+
+      if (
+        !socket ||
+        !socket.connected
+      ) {
+        setError(
+          "Realtime connection is not ready.",
+        );
+
+        return;
+      }
+
+      setStoppingTrip(true);
+      setError("");
+      setMessage("");
+
+      try {
+        await new Promise<void>(
+          (resolve) => {
+            socket.emit(
+              "driver:stop-trip",
+              {
+                tripId,
+              },
+              (
+                response: any,
+              ) => {
+                console.log(
+                  "[STOP TRIP ACK]",
+                  response,
+                );
+
+                if (
+                  !response?.success
+                ) {
+                  setError(
+                    response?.message ||
+                      "Unable to complete trip.",
+                  );
+
+                  resolve();
+                  return;
+                }
+
+                setMessage(
+                  "Trip completed successfully.",
+                );
+
+                stopGPS();
+
+                void loadDashboard();
+
+                window.setTimeout(() => {
+                  if (
+                    mountedRef.current
+                  ) {
+                    setMessage("");
+                  }
+                }, 3000);
+
+                resolve();
+              },
+            );
+          },
+        );
+      } catch (error) {
+        console.error(
+          "STOP_TRIP_CLIENT_ERROR:",
+          error,
+        );
+
+        setError(
+          "Unable to complete trip.",
+        );
+      } finally {
+        if (mountedRef.current) {
+          setStoppingTrip(false);
+        }
+      }
+    }, [
+      loadDashboard,
+      selectedTrip,
+      stopGPS,
+    ]);
+
+  /* =========================================================
+     INITIAL PAGE SETUP
+  ========================================================= */
+
+  useEffect(() => {
+    mountedRef.current =
+      true;
+
+    pageActiveRef.current =
+      true;
+
+    void loadDashboard();
+
+    void connectSocket();
+
+    return () => {
+      mountedRef.current =
+        false;
+
+      pageActiveRef.current =
+        false;
+
+      if (
+        socketReconnectTimerRef.current
+      ) {
+        clearTimeout(
+          socketReconnectTimerRef.current,
+        );
+
+        socketReconnectTimerRef.current =
+          null;
+      }
+
+      stopGPS();
+
+      const socket =
+        socketRef.current;
+
+      if (socket) {
+        try {
+          socket.removeAllListeners();
+
+          socket.io.removeAllListeners();
+
+          socket.disconnect();
+        } catch {
+          // ignore cleanup error
+        }
+      }
+
+      socketRef.current =
+        null;
+
+      socketTokenRef.current =
+        null;
+
+      connectingRef.current =
+        false;
+    };
+  }, [
+    connectSocket,
+    loadDashboard,
+    stopGPS,
+  ]);
+
+  /* =========================================================
+     START GPS WHEN RUNNING TRIP IS AVAILABLE
+  ========================================================= */
+
+  useEffect(() => {
+    if (
+      !selectedTrip ||
+      selectedTrip.status !==
+        "RUNNING"
+    ) {
+      return;
     }
-  }
 
-  /*
-   * ==========================================================
-   * LOADING
-   * ==========================================================
-   */
+    const timer =
+      window.setTimeout(() => {
+        if (
+          mountedRef.current &&
+          pageActiveRef.current
+        ) {
+          startGPS();
+        }
+      }, 500);
+
+    return () => {
+      window.clearTimeout(
+        timer,
+      );
+    };
+  }, [
+    selectedTrip?.tripId,
+    selectedTrip?.id,
+    selectedTrip?.status,
+    startGPS,
+  ]);
+
+  /* =========================================================
+     BFCache + PAGE LIFECYCLE
+  ========================================================= */
+
+  useEffect(() => {
+    const handlePageHide =
+      (event: PageTransitionEvent) => {
+        console.log(
+          "[PAGE] pagehide",
+          {
+            persisted:
+              event.persisted,
+          },
+        );
+
+        pageActiveRef.current =
+          false;
+
+        /*
+         * Stop GPS watcher while page is frozen.
+         * It will be restarted on pageshow.
+         */
+        stopGPS();
+
+        /*
+         * Disconnect Socket.IO cleanly.
+         *
+         * This prevents the browser from leaving a
+         * stale websocket in CLOSING/CLOSED state.
+         */
+        const socket =
+          socketRef.current;
+
+        if (socket) {
+          try {
+            socket.removeAllListeners();
+
+            socket.io.removeAllListeners();
+
+            socket.disconnect();
+          } catch {
+            // ignore
+          }
+        }
+
+        socketRef.current =
+          null;
+
+        setSocketConnected(
+          false,
+        );
+
+        setSocketStatus(
+          "PAUSED",
+        );
+      };
+
+    const handlePageShow =
+      (event: PageTransitionEvent) => {
+        console.log(
+          "[PAGE] pageshow",
+          {
+            persisted:
+              event.persisted,
+          },
+        );
+
+        pageActiveRef.current =
+          true;
+
+        if (
+          !mountedRef.current
+        ) {
+          return;
+        }
+
+        window.setTimeout(() => {
+          if (
+            !mountedRef.current ||
+            !pageActiveRef.current
+          ) {
+            return;
+          }
+
+          console.log(
+            "[PAGE] Restoring realtime tracking...",
+          );
+
+          void connectSocket(
+            true,
+          );
+
+          void loadDashboard();
+
+          if (
+            selectedTripIdRef.current
+          ) {
+            window.setTimeout(() => {
+              if (
+                mountedRef.current &&
+                pageActiveRef.current
+              ) {
+                startGPS();
+              }
+            }, 400);
+          }
+        }, 150);
+      };
+
+    const handleVisibility =
+      () => {
+        const visible =
+          document.visibilityState ===
+          "visible";
+
+        pageActiveRef.current =
+          visible;
+
+        if (!visible) {
+          console.log(
+            "[PAGE] visibility hidden",
+          );
+
+          return;
+        }
+
+        console.log(
+          "[PAGE] visibility restored",
+        );
+
+        if (
+          !mountedRef.current
+        ) {
+          return;
+        }
+
+        window.setTimeout(() => {
+          if (
+            !mountedRef.current ||
+            !pageActiveRef.current
+          ) {
+            return;
+          }
+
+          const socket =
+            socketRef.current;
+
+          if (
+            !socket ||
+            !socket.connected
+          ) {
+            void connectSocket(
+              true,
+            );
+          } else {
+            resendLatestGPS();
+          }
+
+          void loadDashboard();
+
+          if (
+            selectedTripIdRef.current
+          ) {
+            startGPS();
+          }
+        }, 150);
+      };
+
+    window.addEventListener(
+      "pagehide",
+      handlePageHide,
+    );
+
+    window.addEventListener(
+      "pageshow",
+      handlePageShow,
+    );
+
+    document.addEventListener(
+      "visibilitychange",
+      handleVisibility,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "pagehide",
+        handlePageHide,
+      );
+
+      window.removeEventListener(
+        "pageshow",
+        handlePageShow,
+      );
+
+      document.removeEventListener(
+        "visibilitychange",
+        handleVisibility,
+      );
+    };
+  }, [
+    connectSocket,
+    loadDashboard,
+    resendLatestGPS,
+    startGPS,
+    stopGPS,
+  ]);
+
+  /* =========================================================
+     CLOCK FOR STALE STATUS
+  ========================================================= */
+
+  useEffect(() => {
+    const timer =
+      window.setInterval(() => {
+        if (mountedRef.current) {
+          setNow(Date.now());
+        }
+      }, 5000);
+
+    return () => {
+      window.clearInterval(
+        timer,
+      );
+    };
+  }, []);
+
+  /* =========================================================
+     AUTO RECONNECT SAFETY TIMER
+  ========================================================= */
+
+  useEffect(() => {
+    const timer =
+      window.setInterval(() => {
+        if (
+          !mountedRef.current ||
+          !pageActiveRef.current
+        ) {
+          return;
+        }
+
+        const socket =
+          socketRef.current;
+
+        if (
+          !socket ||
+          !socket.connected
+        ) {
+          void connectSocket(
+            true,
+          );
+        }
+      }, SOCKET_RECONNECT_CHECK);
+
+    return () => {
+      window.clearInterval(
+        timer,
+      );
+    };
+  }, [
+    connectSocket,
+  ]);
+
+  /* =========================================================
+     UI HELPERS
+  ========================================================= */
+
+  const driverName =
+    dashboard?.driver?.name ??
+    dashboard?.driver?.username ??
+    "Driver";
+
+  const driverId =
+    dashboard?.driver?.driverId ??
+    dashboard?.driver?.id ??
+    "—";
+
+  const busNumber =
+    selectedBus?.busNumber ??
+    "—";
+
+  const busId =
+    selectedBus?.busId ??
+    selectedBus?.id ??
+    "—";
+
+  const registration =
+    selectedBus?.registration ??
+    "—";
+
+  const routeName =
+    selectedRoute?.name ??
+    "—";
+
+  const routeId =
+    selectedRoute?.routeId ??
+    selectedRoute?.id ??
+    "—";
+
+  const tripDisplayId =
+    selectedTrip?.tripId ??
+    selectedTrip?.id ??
+    "—";
+
+  const canStart =
+    Boolean(
+      selectedTrip &&
+        selectedTrip.status ===
+          "SCHEDULED",
+    );
+
+  const canStop =
+    Boolean(
+      selectedTrip &&
+        selectedTrip.status ===
+          "RUNNING",
+    );
+
+  const statusLabel =
+    selectedTripStatus;
+
+  const lastGPSDisplay =
+    lastValidGPS ??
+    gpsLocation?.recordedAt ??
+    null;
+
+  /* =========================================================
+     LOADING
+  ========================================================= */
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-slate-50 p-6">
-        <div className="mx-auto max-w-6xl">
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
-            <p className="text-slate-700">
-              Dashboard ஏற்றப்படுகிறது...
+      <main className="min-h-screen bg-[#070b18] text-white">
+        <div className="mx-auto flex min-h-screen max-w-7xl items-center justify-center px-6">
+          <div className="rounded-3xl border border-white/10 bg-white/[0.04] px-8 py-10 text-center shadow-2xl">
+            <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-white/10 border-t-cyan-400" />
+
+            <p className="text-lg font-bold">
+              Loading Driver Dashboard
+            </p>
+
+            <p className="mt-2 text-sm text-slate-400">
+              Realtime tracking connection
+              starting...
             </p>
           </div>
         </div>
@@ -1259,516 +2489,639 @@ export default function DriverDashboardPage() {
     );
   }
 
-  /*
-   * ==========================================================
-   * DASHBOARD DATA
-   * ==========================================================
-   */
-
-  const selectedTrip =
-    trips.find(
-      (trip) =>
-        trip.id ===
-        selectedTripId
-    ) ||
-    currentTripRef.current;
-
-  const assignedTrips =
-    trips.filter(
-      (trip) =>
-        trip.status ===
-          "SCHEDULED" ||
-        trip.status ===
-          "RUNNING"
-    );
-
-  const getBusName = (
-    trip: Trip
-  ) => {
-    return (
-      trip.bus?.busNumber ||
-      trip.bus?.busId ||
-      "—"
-    );
-  };
-
-  const getRouteName = (
-    trip: Trip
-  ) => {
-    if (
-      trip.route?.name
-    ) {
-      return trip.route.name;
-    }
-
-    if (
-      trip.route?.routeName
-    ) {
-      return trip.route.routeName;
-    }
-
-    if (
-      trip.route?.origin ||
-      trip.route?.destination
-    ) {
-      return [
-        trip.route?.origin,
-        trip.route?.destination,
-      ]
-        .filter(Boolean)
-        .join(" → ");
-    }
-
-    return "—";
-  };
-
-  const gpsClasses =
-    getGpsStatusClasses();
-
-  /*
-   * ==========================================================
-   * DASHBOARD UI
-   * ==========================================================
-   */
+  /* =========================================================
+     PAGE
+  ========================================================= */
 
   return (
-    <main className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-
-        {/* Header */}
-        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <main className="min-h-screen bg-[#070b18] text-slate-100">
+      {/* HEADER */}
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-[#070b18]/95 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
           <div>
-            <p className="text-sm font-semibold text-blue-600">
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-cyan-400">
               Driver Operations
             </p>
 
-            <h1 className="mt-1 text-3xl font-bold text-slate-900">
+            <h1 className="mt-1 text-xl font-black tracking-tight sm:text-2xl">
               Driver Dashboard
             </h1>
-
-            <p className="mt-2 text-slate-600">
-              வணக்கம்{" "}
-              <span className="font-bold text-slate-900">
-                {driver?.name ||
-                  "Driver"}
-              </span>
-            </p>
           </div>
 
           <div
-            className={`inline-flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ${
+            className={`flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-bold ${
               socketConnected
-                ? "bg-emerald-100 text-emerald-700"
-                : "bg-red-100 text-red-700"
+                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                : "border-amber-500/20 bg-amber-500/10 text-amber-400"
             }`}
           >
             <span
-              className={`h-2.5 w-2.5 rounded-full ${
+              className={`h-2 w-2 rounded-full ${
                 socketConnected
-                  ? "bg-emerald-500"
-                  : "bg-red-500"
+                  ? "bg-emerald-400"
+                  : "animate-pulse bg-amber-400"
               }`}
             />
 
             {socketConnected
               ? "Realtime Connected"
-              : "Realtime Offline"}
+              : socketStatus}
           </div>
         </div>
+      </header>
 
-        {/* Error */}
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        {/* ERROR */}
         {error && (
-          <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm font-medium text-red-700">
-            {error}
+          <div className="mb-5 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-4 text-sm text-red-300">
+            <div className="font-bold">
+              Tracking Error
+            </div>
+
+            <div className="mt-1">
+              {error}
+            </div>
           </div>
         )}
 
-        {/* Success */}
+        {/* SUCCESS */}
         {message && (
-          <div className="mb-6 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm font-medium text-emerald-700">
+          <div className="mb-5 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-300">
             {message}
           </div>
         )}
 
-        {/* Stats */}
-        <div className="mb-8 grid gap-4 sm:grid-cols-3">
-
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <p className="text-sm text-slate-500">
-              Driver ID
+        {/* DRIVER / ASSIGNMENT */}
+        <section className="grid gap-4 md:grid-cols-4">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-xl">
+            <p className="text-xs font-medium text-slate-500">
+              Driver
             </p>
 
-            <p className="mt-2 text-2xl font-bold text-slate-900">
-              {driver?.driverId ||
-                "—"}
+            <p className="mt-2 text-lg font-black">
+              {driverName}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-400">
+              Driver ID: {driverId}
             </p>
           </div>
 
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <p className="text-sm text-slate-500">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-xl">
+            <p className="text-xs font-medium text-slate-500">
+              Assigned Bus
+            </p>
+
+            <p className="mt-2 text-lg font-black">
+              Bus {busNumber}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-400">
+              {registration}
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-xl">
+            <p className="text-xs font-medium text-slate-500">
+              Route
+            </p>
+
+            <p className="mt-2 text-lg font-black">
+              {routeName}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-400">
+              {routeId}
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5 shadow-xl">
+            <p className="text-xs font-medium text-slate-500">
               Assigned Trips
             </p>
 
-            <p className="mt-2 text-2xl font-bold text-slate-900">
-              {assignedTrips.length}
+            <p className="mt-2 text-2xl font-black">
+              {trips.length}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-400">
+              Available trips
             </p>
           </div>
+        </section>
 
-          <div
-            className={`rounded-2xl border p-6 shadow-sm ${gpsClasses.box}`}
-          >
-            <p className="text-sm opacity-80">
-              GPS Status
-            </p>
-
-            <div className="mt-2 flex items-center gap-2">
-              <span
-                className={`h-3 w-3 rounded-full ${gpsClasses.dot}`}
-              />
-
-              <p
-                className={`text-2xl font-bold ${gpsClasses.text}`}
-              >
-                {getGpsStatusText()}
+        {/* TRIP SELECTION */}
+        <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div className="flex-1">
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-cyan-400">
+                Current Trip
               </p>
-            </div>
-          </div>
-        </div>
 
-        {/* Trip Selection */}
-        <section className="mb-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <label className="mt-3 block text-sm font-semibold text-slate-300">
+                Select assigned trip
+              </label>
 
-          <div className="mb-6">
-            <h2 className="text-xl font-bold text-slate-900">
-              பயணத்தை தேர்வு செய்யுங்கள்
-            </h2>
-
-            <p className="mt-1 text-sm text-slate-500">
-              Assigned scheduled trip-ஐ தேர்வு செய்து பயணத்தை தொடங்குங்கள்.
-            </p>
-          </div>
-
-          {assignedTrips.length ===
-          0 ? (
-            <div className="rounded-xl bg-slate-50 p-5 text-sm text-slate-600">
-              தற்போது Scheduled Trip இல்லை.
-            </div>
-          ) : (
-            <>
               <select
                 value={
                   selectedTripId
                 }
-                onChange={(event) =>
+                onChange={(event) => {
+                  const value =
+                    event.target.value;
+
                   setSelectedTripId(
-                    event.target.value
-                  )
-                }
-                disabled={
-                  tracking ||
-                  starting
-                }
-                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    value,
+                  );
+
+                  selectedTripIdRef.current =
+                    value;
+
+                  const trip =
+                    trips.find(
+                      (item) =>
+                        item.tripId ===
+                          value ||
+                        item.id === value,
+                    );
+
+                  if (
+                    trip?.status ===
+                    "RUNNING"
+                  ) {
+                    startGPS();
+                  } else {
+                    stopGPS();
+                  }
+                }}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-[#0b1020] px-4 py-3 text-sm font-semibold text-white outline-none transition focus:border-cyan-400/50"
               >
                 <option value="">
-                  -- பயணத்தை தேர்வு செய்யுங்கள் --
+                  Select trip
                 </option>
 
-                {assignedTrips.map(
-                  (trip) => (
-                    <option
-                      key={trip.id}
-                      value={trip.id}
-                    >
-                      {trip.tripId} —{" "}
-                      {getBusName(
-                        trip
-                      )}{" "}
-                      —{" "}
-                      {getRouteName(
-                        trip
-                      )}{" "}
-                      —{" "}
-                      {trip.status}
-                    </option>
-                  )
+                {trips.map(
+                  (trip) => {
+                    const id =
+                      trip.tripId ??
+                      trip.id ??
+                      "";
+
+                    return (
+                      <option
+                        key={id}
+                        value={id}
+                      >
+                        {id} — Bus{" "}
+                        {trip.bus
+                          ?.busNumber ??
+                          busNumber}{" "}
+                        —{" "}
+                        {trip.route
+                          ?.name ??
+                          routeName}{" "}
+                        —{" "}
+                        {trip.status}
+                      </option>
+                    );
+                  },
                 )}
               </select>
+            </div>
 
-              {selectedTrip && (
-                <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() =>
+                  void loadDashboard()
+                }
+                className="rounded-xl border border-white/10 bg-white/[0.05] px-5 py-3 text-sm font-bold text-slate-200 transition hover:bg-white/[0.09]"
+              >
+                Refresh
+              </button>
 
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-xs text-slate-500">
-                      Bus
-                    </p>
-
-                    <p className="mt-1 font-bold text-slate-900">
-                      {getBusName(
-                        selectedTrip
-                      )}
-                    </p>
-
-                    {selectedTrip
-                      .bus
-                      ?.busNumber && (
-                      <p className="mt-1 text-xs text-slate-500">
-                        {selectedTrip.bus.busNumber}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-xs text-slate-500">
-                      Route
-                    </p>
-
-                    <p className="mt-1 font-bold text-slate-900">
-                      {getRouteName(
-                        selectedTrip
-                      )}
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl bg-slate-50 p-4">
-                    <p className="text-xs text-slate-500">
-                      Status
-                    </p>
-
-                    <p
-                      className={`mt-1 font-bold ${
-                        selectedTrip.status ===
-                        "RUNNING"
-                          ? "text-emerald-600"
-                          : selectedTrip.status ===
-                            "SCHEDULED"
-                          ? "text-blue-600"
-                          : "text-slate-700"
-                      }`}
-                    >
-                      {
-                        selectedTrip.status
-                      }
-                    </p>
-                  </div>
-
-                </div>
+              {canStart && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void startTrip()
+                  }
+                  disabled={
+                    startingTrip
+                  }
+                  className="rounded-xl bg-emerald-500 px-5 py-3 text-sm font-black text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {startingTrip
+                    ? "Starting..."
+                    : "Start Trip"}
+                </button>
               )}
 
-              <div className="mt-6 flex flex-wrap gap-3">
+              {canStop && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void stopTrip()
+                  }
+                  disabled={
+                    stoppingTrip
+                  }
+                  className="rounded-xl bg-red-500 px-5 py-3 text-sm font-black text-white transition hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {stoppingTrip
+                    ? "Stopping..."
+                    : "Stop Trip"}
+                </button>
+              )}
+            </div>
+          </div>
 
-                {!tracking ? (
-                  <button
-                    type="button"
-                    onClick={
-                      startTrip
-                    }
-                    disabled={
-                      starting ||
-                      !selectedTripId
-                    }
-                    className="rounded-xl bg-emerald-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {starting
-                      ? "தொடங்குகிறது..."
-                      : "🚌 பயணத்தை தொடங்கு"}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={
-                      stopTrip
-                    }
-                    disabled={
-                      starting
-                    }
-                    className="rounded-xl bg-red-600 px-6 py-3 text-sm font-bold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {starting
-                      ? "நிறுத்துகிறது..."
-                      : "⛔ பயணத்தை நிறுத்து"}
-                  </button>
-                )}
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <p className="text-xs text-slate-500">
+                Trip
+              </p>
 
-              </div>
-            </>
-          )}
+              <p className="mt-1 break-all text-sm font-bold">
+                {tripDisplayId}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <p className="text-xs text-slate-500">
+                Bus
+              </p>
+
+              <p className="mt-1 text-sm font-bold">
+                {busNumber}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <p className="text-xs text-slate-500">
+                Route
+              </p>
+
+              <p className="mt-1 text-sm font-bold">
+                {routeName}
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <p className="text-xs text-slate-500">
+                Status
+              </p>
+
+              <p
+                className={`mt-1 text-sm font-black ${
+                  statusLabel ===
+                  "RUNNING"
+                    ? "text-emerald-400"
+                    : statusLabel ===
+                        "COMPLETED"
+                      ? "text-slate-400"
+                      : "text-amber-400"
+                }`}
+              >
+                {statusLabel}
+              </p>
+            </div>
+          </div>
         </section>
 
-        {/* GPS Status */}
-        <section className="mb-8 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
-          <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        {/* GPS */}
+        <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <h2 className="text-xl font-bold text-slate-900">
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-cyan-400">
                 GPS Tracking
+              </p>
+
+              <h2 className="mt-1 text-xl font-black">
+                Live Location
               </h2>
 
-              <p className="mt-1 text-sm text-slate-500">
-                Device GPS location realtime-ஆக server-க்கு அனுப்பப்படுகிறது.
+              <p className="mt-1 text-sm text-slate-400">
+                Driver GPS location is
+                continuously sent to the
+                realtime tracking server.
               </p>
             </div>
 
             <div
-              className={`inline-flex w-fit items-center gap-2 rounded-full border px-4 py-2 text-sm font-bold ${gpsClasses.box} ${gpsClasses.text}`}
+              className={`rounded-full border px-4 py-2 text-xs font-black ${gpsLevelClass(
+                currentGpsLevel,
+              )}`}
             >
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${gpsClasses.dot}`}
-              />
-
-              {getGpsStatusText()}
+              {gpsIsStale
+                ? "GPS STALE"
+                : gpsStatus}
             </div>
           </div>
 
-          {gpsStatus ===
-            "SEARCHING" && (
-            <div className="mb-6 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
-              <p className="font-bold">
-                📡 GPS signal தேடப்படுகிறது...
-              </p>
-
-              <p className="mt-1">
-                Mobile Location/GPS ON செய்து,
-                browser Location permission-ஐ
-                Allow செய்யுங்கள்.
-              </p>
+          {gpsError && (
+            <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+              {gpsError}
             </div>
           )}
 
-          {gpsStatus ===
-            "POOR" && (
-            <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              <p className="font-bold">
-                ⚠️ GPS accuracy மிகவும் குறைவு
+          <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
+              <p className="text-xs text-slate-500">
+                GPS Status
               </p>
 
-              <p className="mt-1">
-                Current accuracy:{" "}
-                {accuracy != null
-                  ? `${accuracy.toFixed(
-                      0
-                    )}m`
-                  : "—"}
-                . Better GPS signal கிடைக்கும் வரை
-                இந்த location server-க்கு அனுப்பப்படாது.
+              <p
+                className={`mt-2 text-lg font-black ${
+                  currentGpsLevel ===
+                  "GOOD"
+                    ? "text-emerald-400"
+                    : currentGpsLevel ===
+                        "FAIR"
+                      ? "text-amber-400"
+                      : currentGpsLevel ===
+                          "POOR"
+                        ? "text-red-400"
+                        : "text-slate-300"
+                }`}
+              >
+                {gpsIsStale
+                  ? "STALE"
+                  : gpsStatus}
+              </p>
+
+              <p className="mt-1 text-xs text-slate-500">
+                {sendingGPS
+                  ? "Sending location..."
+                  : socketConnected
+                    ? "Realtime ready"
+                    : "Waiting for socket..."}
               </p>
             </div>
-          )}
 
-          {gpsStatus ===
-            "GOOD" && (
-            <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
-              <p className="font-bold">
-                ✅ Good GPS signal
-              </p>
-
-              <p className="mt-1">
-                Realtime location server-க்கு அனுப்பப்படுகிறது.
-              </p>
-            </div>
-          )}
-
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-
-            <div className="rounded-xl bg-slate-50 p-4">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
               <p className="text-xs text-slate-500">
                 Latitude
               </p>
 
-              <p className="mt-1 break-all font-bold text-slate-900">
-                {latitude != null
-                  ? latitude.toFixed(
-                      6
+              <p className="mt-2 text-lg font-black">
+                {gpsLocation
+                  ? gpsLocation.latitude.toFixed(
+                      6,
                     )
                   : "—"}
               </p>
             </div>
 
-            <div className="rounded-xl bg-slate-50 p-4">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
               <p className="text-xs text-slate-500">
                 Longitude
               </p>
 
-              <p className="mt-1 break-all font-bold text-slate-900">
-                {longitude != null
-                  ? longitude.toFixed(
-                      6
+              <p className="mt-2 text-lg font-black">
+                {gpsLocation
+                  ? gpsLocation.longitude.toFixed(
+                      6,
                     )
                   : "—"}
               </p>
             </div>
 
-            <div className="rounded-xl bg-slate-50 p-4">
-              <p className="text-xs text-slate-500">
-                Speed
-              </p>
-
-              <p className="mt-1 font-bold text-slate-900">
-                {speed != null
-                  ? `${speed.toFixed(
-                      1
-                    )} km/h`
-                  : "—"}
-              </p>
-            </div>
-
-            <div className="rounded-xl bg-slate-50 p-4">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
               <p className="text-xs text-slate-500">
                 Accuracy
               </p>
 
-              <p
-                className={`mt-1 font-bold ${
-                  accuracy == null
-                    ? "text-slate-900"
-                    : accuracy <= 50
-                    ? "text-emerald-600"
-                    : accuracy <= 200
-                    ? "text-amber-600"
-                    : "text-red-600"
-                }`}
-              >
-                {accuracy != null
-                  ? `${accuracy.toFixed(
-                      1
+              <p className="mt-2 text-lg font-black">
+                {gpsLocation
+                  ? `${gpsLocation.accuracy.toFixed(
+                      1,
                     )} m`
                   : "—"}
               </p>
             </div>
 
-          </div>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-
-            <div className="rounded-xl bg-slate-50 p-4">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
               <p className="text-xs text-slate-500">
-                Heading
+                Speed
               </p>
 
-              <p className="mt-1 font-bold text-slate-900">
-                {heading != null
-                  ? `${heading.toFixed(
-                      0
-                    )}°`
+              <p className="mt-2 text-lg font-black">
+                {gpsLocation?.speed !==
+                  null &&
+                gpsLocation?.speed !==
+                  undefined
+                  ? `${(
+                      gpsLocation.speed *
+                      3.6
+                    ).toFixed(1)} km/h`
                   : "—"}
               </p>
             </div>
 
-            <div className="rounded-xl bg-slate-50 p-4">
+            <div className="rounded-2xl border border-white/10 bg-[#0b1020] p-5">
+              <p className="text-xs text-slate-500">
+                Heading
+              </p>
+
+              <p className="mt-2 text-lg font-black">
+                {gpsLocation?.heading !==
+                  null &&
+                gpsLocation?.heading !==
+                  undefined
+                  ? `${gpsLocation.heading.toFixed(
+                      0,
+                    )}°`
+                  : "—"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
               <p className="text-xs text-slate-500">
                 Last Valid GPS
               </p>
 
-              <p className="mt-1 font-bold text-slate-900">
-                {lastGpsTime
-                  ? lastGpsTime.toLocaleTimeString()
+              <p className="mt-1 text-sm font-bold">
+                {lastGPSDisplay
+                  ? formatDateTime(
+                      lastGPSDisplay,
+                    )
                   : "Waiting..."}
               </p>
             </div>
 
+            <div className="rounded-2xl border border-white/10 bg-black/10 p-4">
+              <p className="text-xs text-slate-500">
+                Last Server ACK
+              </p>
+
+              <p className="mt-1 text-sm font-bold">
+                {lastSocketSuccess
+                  ? formatDateTime(
+                      lastSocketSuccess,
+                    )
+                  : "Waiting..."}
+              </p>
+            </div>
           </div>
         </section>
 
+        {/* CONNECTION INFO */}
+        <section className="mt-6 grid gap-4 lg:grid-cols-3">
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              Socket Connection
+            </p>
+
+            <div className="mt-3 flex items-center gap-3">
+              <span
+                className={`h-3 w-3 rounded-full ${
+                  socketConnected
+                    ? "bg-emerald-400"
+                    : "animate-pulse bg-amber-400"
+                }`}
+              />
+
+              <span className="text-lg font-black">
+                {socketConnected
+                  ? "ONLINE"
+                  : socketStatus}
+              </span>
+            </div>
+
+            <p className="mt-2 text-xs text-slate-500">
+              Server: {SOCKET_URL}
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              GPS Stream
+            </p>
+
+            <p className="mt-3 text-lg font-black text-cyan-400">
+              {watchIdRef.current !==
+              null
+                ? "ACTIVE"
+                : "STOPPED"}
+            </p>
+
+            <p className="mt-2 text-xs text-slate-500">
+              Fresh GPS request every{" "}
+              {GPS_REFRESH_INTERVAL /
+                1000}
+              s
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              GPS Rules
+            </p>
+
+            <div className="mt-3 space-y-1 text-xs">
+              <p className="text-emerald-400">
+                GOOD ≤ 50m
+              </p>
+
+              <p className="text-amber-400">
+                FAIR ≤ 200m
+              </p>
+
+              <p className="text-red-400">
+                POOR &gt; 200m
+              </p>
+
+              <p className="text-slate-500">
+                Reject &gt; 1000m
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* DEBUG INFO */}
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.025] p-5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">
+                Realtime Diagnostics
+              </p>
+
+              <p className="mt-1 text-sm text-slate-400">
+                BFCache/reconnect protection is
+                active.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                void connectSocket(
+                  true,
+                );
+
+                if (
+                  selectedTripIdRef.current
+                ) {
+                  window.setTimeout(
+                    () => {
+                      startGPS();
+                    },
+                    500,
+                  );
+                }
+              }}
+              className="rounded-xl border border-cyan-500/20 bg-cyan-500/10 px-4 py-2 text-xs font-black text-cyan-300 hover:bg-cyan-500/20"
+            >
+              Reconnect Tracking
+            </button>
+          </div>
+
+          <div className="mt-4 grid gap-3 text-xs sm:grid-cols-3">
+            <div className="rounded-xl bg-black/20 p-3">
+              <span className="text-slate-500">
+                Socket
+              </span>
+
+              <span className="ml-2 font-bold">
+                {socketConnected
+                  ? "CONNECTED"
+                  : "DISCONNECTED"}
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-black/20 p-3">
+              <span className="text-slate-500">
+                GPS watcher
+              </span>
+
+              <span className="ml-2 font-bold">
+                {watchIdRef.current !==
+                null
+                  ? "ACTIVE"
+                  : "STOPPED"}
+              </span>
+            </div>
+
+            <div className="rounded-xl bg-black/20 p-3">
+              <span className="text-slate-500">
+                Selected trip
+              </span>
+
+              <span className="ml-2 font-bold">
+                {tripDisplayId}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        {/* FOOTER */}
+        <footer className="pb-8 pt-8 text-center text-xs text-slate-600">
+          Bus Tracking • Driver realtime GPS
+          operations
+        </footer>
       </div>
     </main>
   );

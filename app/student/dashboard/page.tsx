@@ -17,6 +17,7 @@ type DashboardData = {
     id: string;
     studentId: string;
     name: string;
+    voiceName: string;
   };
 
   assignment: {
@@ -68,6 +69,27 @@ type DashboardData = {
     missedAt: string | null;
   } | null;
 
+  studentLocation: {
+    id: string;
+    studentId: string;
+    name: string;
+    address: string | null;
+    latitude: number;
+    longitude: number;
+    active: boolean;
+    updatedAt: string;
+  } | null;
+
+  collegeLocation: {
+    id: string;
+    name: string;
+    address: string | null;
+    latitude: number;
+    longitude: number;
+    active: boolean;
+    updatedAt: string;
+  } | null;
+
   notifications: {
     id: string;
     type: string;
@@ -79,51 +101,55 @@ type DashboardData = {
   }[];
 };
 
-type LiveBusLocation = {
+type LiveLocation = {
   tripId: string;
   busId: string;
   latitude: number;
   longitude: number;
-  accuracy?: number | null;
-  speed?: number | null;
-  heading?: number | null;
-  recordedAt?: string;
+  accuracy: number | null;
+  speed: number | null;
+  heading: number | null;
+  recordedAt: string;
+};
+
+type ProximityPayload = {
+  tripId?: string;
+  studentId?: string;
+  distanceMeters?: number;
+  status?: string;
+  notificationType?: string;
+  message?: string;
 };
 
 type StudentNotification = {
-  id?: string;
+  id: string;
   type: string;
   title: string;
   message: string;
-  tripId?: string | null;
-  createdAt?: string;
+  tripId: string | null;
+  read: boolean;
+  createdAt: string;
 };
 
-type StudentMapProps = {
-  busLocation: LiveBusLocation | null;
-  pickupStop: {
-    id: string;
-    stopId: string;
-    name: string;
-    latitude: number;
-    longitude: number;
-    sequence: number;
-  };
-  busNumber: string;
-  registration: string;
-  tripRunning: boolean;
+type SoundSettings = {
+  enabled: boolean;
+  volume: number;
+  approaching: boolean;
+  nearby: boolean;
+  arrived: boolean;
 };
 
-const StudentMap = dynamic<StudentMapProps>(
+const StudentMap = dynamic(
   () => import("./StudentMap"),
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-[420px] w-full items-center justify-center bg-slate-900">
+      <div className="flex h-[380px] items-center justify-center bg-slate-900">
         <div className="text-center">
           <div className="text-4xl">🗺️</div>
+
           <p className="mt-3 text-sm text-slate-400">
-            Loading live map...
+            Live map loading...
           </p>
         </div>
       </div>
@@ -131,28 +157,38 @@ const StudentMap = dynamic<StudentMapProps>(
   }
 );
 
-function calculateDistanceMeters(
-  latitude1: number,
-  longitude1: number,
-  latitude2: number,
-  longitude2: number
+const SOCKET_URL = "http://127.0.0.1:4001";
+
+const DEFAULT_SOUND_SETTINGS: SoundSettings = {
+  enabled: true,
+  volume: 0.8,
+  approaching: true,
+  nearby: true,
+  arrived: true,
+};
+
+function distanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
 ) {
-  const earthRadius = 6371000;
+  const R = 6371000;
 
   const dLat =
-    ((latitude2 - latitude1) * Math.PI) / 180;
+    ((lat2 - lat1) * Math.PI) / 180;
 
-  const dLng =
-    ((longitude2 - longitude1) * Math.PI) / 180;
+  const dLon =
+    ((lon2 - lon1) * Math.PI) / 180;
 
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos((latitude1 * Math.PI) / 180) *
-      Math.cos((latitude2 * Math.PI) / 180) *
-      Math.sin(dLng / 2) ** 2;
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
 
   return (
-    earthRadius *
+    R *
     2 *
     Math.atan2(
       Math.sqrt(a),
@@ -161,7 +197,40 @@ function calculateDistanceMeters(
   );
 }
 
-function getGpsLevel(
+function formatDistance(
+  distance: number | null
+) {
+  if (distance === null) {
+    return "—";
+  }
+
+  if (distance >= 1000) {
+    return `${(distance / 1000).toFixed(2)} km`;
+  }
+
+  return `${Math.round(distance)} m`;
+}
+
+function formatDate(
+  value?: string | null
+) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+
+  return date.toLocaleString("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function gpsQuality(
   accuracy: number | null | undefined
 ) {
   if (accuracy == null) {
@@ -179,22 +248,63 @@ function getGpsLevel(
   return "POOR";
 }
 
-function isLocationStale(
-  recordedAt: string | undefined,
-  maxAgeMs = 60_000
+function notificationIcon(
+  type: string
 ) {
-  if (!recordedAt) {
-    return true;
+  if (type === "BUS_APPROACHING") {
+    return "🚌";
   }
 
-  const timestamp =
-    new Date(recordedAt).getTime();
-
-  if (!Number.isFinite(timestamp)) {
-    return true;
+  if (type === "BUS_NEAR") {
+    return "🔔";
   }
 
-  return Date.now() - timestamp > maxAgeMs;
+  if (type === "BUS_ARRIVING") {
+    return "📍";
+  }
+
+  if (type === "BUS_STARTED") {
+    return "🚍";
+  }
+
+  return "🔔";
+}
+
+function tamilMessage(
+  name: string,
+  type: string,
+  distance?: number
+) {
+  const studentName =
+    name.trim() || "மாணவரே";
+
+  if (type === "BUS_ARRIVING") {
+    return `${studentName}, உங்கள் பஸ் உங்கள் நிறுத்தத்திற்கு வந்துவிட்டது. தயாராக இருங்கள்.`;
+  }
+
+  if (
+    type === "BUS_NEAR" &&
+    typeof distance === "number"
+  ) {
+    return `${studentName}, உங்கள் பஸ் ${Math.round(distance)} மீட்டர் தொலைவில் உள்ளது. தயாராக இருங்கள்.`;
+  }
+
+  if (
+    type === "BUS_APPROACHING" &&
+    typeof distance === "number"
+  ) {
+    return `${studentName}, உங்கள் பஸ் ${Math.round(distance)} மீட்டர் தொலைவில் உள்ளது. தயாராக இருங்கள்.`;
+  }
+
+  if (type === "BUS_NEAR") {
+    return `${studentName}, உங்கள் பஸ் அருகில் வந்துவிட்டது. தயாராக இருங்கள்.`;
+  }
+
+  if (type === "BUS_APPROACHING") {
+    return `${studentName}, உங்கள் பஸ் உங்கள் நிறுத்தத்தை நோக்கி வருகிறது. தயாராக இருங்கள்.`;
+  }
+
+  return null;
 }
 
 export default function StudentDashboardPage() {
@@ -206,48 +316,806 @@ export default function StudentDashboardPage() {
   const dataRef =
     useRef<DashboardData | null>(null);
 
+  const spokenRef =
+    useRef<Set<string>>(new Set());
+
+  const audioContextRef =
+    useRef<AudioContext | null>(null);
+
+  const soundSettingsRef =
+    useRef<SoundSettings>(
+      DEFAULT_SOUND_SETTINGS
+    );
+
   const [data, setData] =
     useState<DashboardData | null>(null);
 
   const [loading, setLoading] =
     useState(true);
 
-  const [socketConnected, setSocketConnected] =
-    useState(false);
-
   const [error, setError] =
     useState("");
 
+  const [connected, setConnected] =
+    useState(false);
+
   const [liveLocation, setLiveLocation] =
-    useState<LiveBusLocation | null>(null);
+    useState<LiveLocation | null>(null);
 
   const [notifications, setNotifications] =
     useState<StudentNotification[]>([]);
 
-  const [now, setNow] =
-    useState(Date.now());
+  const [soundSettings, setSoundSettings] =
+    useState<SoundSettings>(
+      DEFAULT_SOUND_SETTINGS
+    );
 
-  /*
-   * Keep dataRef synchronized.
-   */
+  const [audioReady, setAudioReady] =
+    useState(false);
+
+  const [voiceStatus, setVoiceStatus] =
+    useState(
+      "Voice not tested yet."
+    );
+
+  const [now, setNow] =
+    useState<number>(Date.now());
+
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
 
+  useEffect(() => {
+    const timer =
+      window.setInterval(() => {
+        setNow(Date.now());
+      }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
   /*
-   * Load dashboard.
+   * ---------------------------------------------------------
+   * SOUND SETTINGS
+   * ---------------------------------------------------------
    */
-  const loadDashboard = useCallback(
-    async () => {
-      try {
-        const response = await fetch(
-          "/api/student/dashboard",
-          {
-            method: "GET",
-            credentials: "include",
-            cache: "no-store",
-          }
+
+  useEffect(() => {
+    try {
+      const saved =
+        localStorage.getItem(
+          "student-notification-settings"
         );
+
+      if (saved) {
+        const parsed =
+          JSON.parse(saved);
+
+        const settings: SoundSettings = {
+          enabled:
+            parsed.enabled !== false,
+
+          volume:
+            typeof parsed.volume === "number"
+              ? Math.max(
+                  0,
+                  Math.min(
+                    1,
+                    parsed.volume
+                  )
+                )
+              : 0.8,
+
+          approaching:
+            parsed.approaching !== false,
+
+          nearby:
+            parsed.nearby !== false,
+
+          arrived:
+            parsed.arrived !== false,
+        };
+
+        setSoundSettings(settings);
+
+        soundSettingsRef.current =
+          settings;
+      }
+    } catch {
+      // Keep defaults.
+    }
+  }, []);
+
+  useEffect(() => {
+    soundSettingsRef.current =
+      soundSettings;
+
+    try {
+      localStorage.setItem(
+        "student-notification-settings",
+        JSON.stringify(
+          soundSettings
+        )
+      );
+    } catch {
+      // Ignore storage errors.
+    }
+  }, [soundSettings]);
+
+  /*
+   * ---------------------------------------------------------
+   * AUDIO UNLOCK
+   * ---------------------------------------------------------
+   */
+
+  const unlockAudio =
+    useCallback(async () => {
+      if (
+        typeof window === "undefined"
+      ) {
+        return null;
+      }
+
+      if (!audioContextRef.current) {
+        const AudioContextClass =
+          window.AudioContext ||
+          (
+            window as typeof window & {
+              webkitAudioContext?: typeof AudioContext;
+            }
+          ).webkitAudioContext;
+
+        if (!AudioContextClass) {
+          return null;
+        }
+
+        audioContextRef.current =
+          new AudioContextClass();
+      }
+
+      const context =
+        audioContextRef.current;
+
+      try {
+        if (
+          context.state ===
+          "suspended"
+        ) {
+          await context.resume();
+        }
+
+        setAudioReady(true);
+
+        return context;
+      } catch (error) {
+        console.error(
+          "Audio unlock failed:",
+          error
+        );
+
+        return null;
+      }
+    }, []);
+
+  /*
+   * ---------------------------------------------------------
+   * BEEP
+   * ---------------------------------------------------------
+   */
+
+  const playBeep =
+    useCallback(
+      async (
+        frequency: number
+      ) => {
+        const context =
+          await unlockAudio();
+
+        if (!context) {
+          return;
+        }
+
+        const oscillator =
+          context.createOscillator();
+
+        const gain =
+          context.createGain();
+
+        oscillator.type = "sine";
+
+        oscillator.frequency.value =
+          frequency;
+
+        gain.gain.setValueAtTime(
+          0,
+          context.currentTime
+        );
+
+        gain.gain.linearRampToValueAtTime(
+          soundSettingsRef.current.volume *
+            0.15,
+          context.currentTime + 0.03
+        );
+
+        gain.gain.linearRampToValueAtTime(
+          0,
+          context.currentTime + 0.35
+        );
+
+        oscillator.connect(gain);
+
+        gain.connect(
+          context.destination
+        );
+
+        oscillator.start();
+
+        oscillator.stop(
+          context.currentTime + 0.35
+        );
+      },
+      [unlockAudio]
+    );
+
+  /*
+   * ---------------------------------------------------------
+   * GET TAMIL VOICE
+   * ---------------------------------------------------------
+   */
+
+  const getTamilVoice =
+    useCallback(() => {
+      if (
+        typeof window === "undefined" ||
+        !("speechSynthesis" in window)
+      ) {
+        return null;
+      }
+
+      const voices =
+        window.speechSynthesis.getVoices();
+
+      const tamilIndiaVoice =
+        voices.find(
+          (voice) =>
+            voice.lang
+              .toLowerCase() ===
+            "ta-in"
+        );
+
+      if (tamilIndiaVoice) {
+        return tamilIndiaVoice;
+      }
+
+      const tamilVoice =
+        voices.find(
+          (voice) =>
+            voice.lang
+              .toLowerCase()
+              .startsWith("ta")
+        );
+
+      return tamilVoice ?? null;
+    }, []);
+
+  /*
+   * ---------------------------------------------------------
+   * WAIT FOR BROWSER VOICES
+   * ---------------------------------------------------------
+   */
+
+  const waitForVoices =
+    useCallback(async () => {
+      if (
+        typeof window === "undefined" ||
+        !("speechSynthesis" in window)
+      ) {
+        return [];
+      }
+
+      const synth =
+        window.speechSynthesis;
+
+      const hasTamilVoice = (
+        voices: SpeechSynthesisVoice[]
+      ) =>
+        voices.some(
+          (voice) =>
+            voice.lang
+              .toLowerCase()
+              .replace("_", "-")
+              .startsWith("ta")
+        );
+
+      let voices =
+        synth.getVoices();
+
+      /*
+       * Important:
+       * Do NOT return merely because English
+       * voices loaded. Wait until Tamil voice
+       * appears or timeout expires.
+       */
+
+      if (
+        voices.length > 0 &&
+        hasTamilVoice(voices)
+      ) {
+        return voices;
+      }
+
+      voices =
+        await new Promise<
+          SpeechSynthesisVoice[]
+        >((resolve) => {
+          let finished = false;
+
+          let timer:
+            number | undefined;
+
+          const finish = () => {
+            if (finished) {
+              return;
+            }
+
+            finished = true;
+
+            synth.removeEventListener(
+              "voiceschanged",
+              handleVoicesChanged
+            );
+
+            if (timer !== undefined) {
+              window.clearTimeout(timer);
+            }
+
+            resolve(
+              synth.getVoices()
+            );
+          };
+
+          const handleVoicesChanged =
+            () => {
+              const current =
+                synth.getVoices();
+
+              if (
+                hasTamilVoice(
+                  current
+                )
+              ) {
+                finish();
+              }
+            };
+
+          synth.addEventListener(
+            "voiceschanged",
+            handleVoicesChanged
+          );
+
+          timer =
+            window.setTimeout(
+              finish,
+              4000
+            );
+
+          /*
+           * Re-check immediately in case
+           * the event already fired.
+           */
+
+          const current =
+            synth.getVoices();
+
+          if (
+            hasTamilVoice(current)
+          ) {
+            finish();
+          }
+        });
+
+      return voices;
+    }, []);
+
+  /*
+   * ---------------------------------------------------------
+   * SPEAK TAMIL
+   * ---------------------------------------------------------
+   */
+
+  const speakTamil =
+    useCallback(
+      async (
+        type: string,
+        distance?: number
+      ) => {
+        const settings =
+          soundSettingsRef.current;
+
+        if (!settings.enabled) {
+          return;
+        }
+
+        if (
+          type === "BUS_APPROACHING" &&
+          !settings.approaching
+        ) {
+          return;
+        }
+
+        if (
+          type === "BUS_NEAR" &&
+          !settings.nearby
+        ) {
+          return;
+        }
+
+        if (
+          type === "BUS_ARRIVING" &&
+          !settings.arrived
+        ) {
+          return;
+        }
+
+        const current =
+          dataRef.current;
+
+        if (!current) {
+          return;
+        }
+
+        const name =
+          current.student.voiceName?.trim() ||
+          current.student.name;
+
+        const text =
+          tamilMessage(
+            name,
+            type,
+            distance
+          );
+
+        if (!text) {
+          return;
+        }
+
+        await unlockAudio();
+
+        if (
+          type === "BUS_APPROACHING"
+        ) {
+          await playBeep(660);
+        } else if (
+          type === "BUS_NEAR"
+        ) {
+          await playBeep(880);
+        } else if (
+          type === "BUS_ARRIVING"
+        ) {
+          await playBeep(1046);
+        }
+
+        if (
+          typeof window === "undefined" ||
+          !("speechSynthesis" in window)
+        ) {
+          setVoiceStatus(
+            "Browser Speech Synthesis is not available."
+          );
+
+          return;
+        }
+
+        const voices =
+          await waitForVoices();
+
+        const tamilVoice =
+          voices.find(
+            (voice) =>
+              voice.lang
+                .toLowerCase() ===
+              "ta-in"
+          ) ||
+          voices.find(
+            (voice) =>
+              voice.lang
+                .toLowerCase()
+                .startsWith("ta")
+          );
+
+        if (!tamilVoice) {
+          setVoiceStatus(
+            "Tamil voice not installed in this browser/Windows."
+          );
+
+          console.warn(
+            "Tamil voice not found.",
+            voices.map(
+              (voice) =>
+                `${voice.name} (${voice.lang})`
+            )
+          );
+
+          return;
+        }
+
+        const synth =
+          window.speechSynthesis;
+
+        synth.cancel();
+
+        const utterance =
+          new SpeechSynthesisUtterance(
+            text
+          );
+
+        utterance.lang =
+          "ta-IN";
+
+        utterance.voice =
+          tamilVoice;
+
+        utterance.volume =
+          settings.volume;
+
+        utterance.rate = 0.88;
+        utterance.pitch = 1;
+
+        utterance.onstart = () => {
+          setVoiceStatus(
+            `Speaking Tamil: ${tamilVoice.name}`
+          );
+        };
+
+        utterance.onend = () => {
+          setVoiceStatus(
+            `Tamil voice ready: ${tamilVoice.name}`
+          );
+        };
+
+        utterance.onerror = (
+          event
+        ) => {
+          console.error(
+            "Tamil speech error:",
+            event
+          );
+
+          setVoiceStatus(
+            `Tamil speech error: ${event.error}`
+          );
+        };
+
+        synth.speak(utterance);
+      },
+      [
+        playBeep,
+        unlockAudio,
+        waitForVoices,
+      ]
+    );
+
+  /*
+   * ---------------------------------------------------------
+   * TEST TAMIL VOICE
+   * ---------------------------------------------------------
+   */
+
+  const testTamilVoice =
+    useCallback(async () => {
+      const current =
+        dataRef.current;
+
+      if (!current) {
+        setVoiceStatus(
+          "Student data is not loaded."
+        );
+
+        return;
+      }
+
+      const context =
+        await unlockAudio();
+
+      if (!context) {
+        setVoiceStatus(
+          "Audio could not be unlocked. Check browser sound permission."
+        );
+
+        return;
+      }
+
+      /*
+       * First play a short beep.
+       * This proves browser audio itself is working.
+       */
+
+      await playBeep(880);
+
+      if (
+        typeof window === "undefined" ||
+        !("speechSynthesis" in window)
+      ) {
+        setVoiceStatus(
+          "Speech Synthesis is not supported by this browser."
+        );
+
+        return;
+      }
+
+      const synth =
+        window.speechSynthesis;
+
+      /*
+       * Wait for Chrome/Edge to load
+       * its available voice list.
+       */
+
+      const voices =
+        await waitForVoices();
+
+      console.log(
+        "Available browser voices:",
+        voices.map(
+          (voice) => ({
+            name: voice.name,
+            lang: voice.lang,
+            localService:
+              voice.localService,
+          })
+        )
+      );
+
+      const tamilVoices =
+        voices.filter(
+          (voice) =>
+            voice.lang
+              .toLowerCase()
+              .startsWith("ta")
+        );
+
+      console.log(
+        "Tamil voices:",
+        tamilVoices.map(
+          (voice) => ({
+            name: voice.name,
+            lang: voice.lang,
+            localService:
+              voice.localService,
+          })
+        )
+      );
+
+      const tamilVoice =
+        tamilVoices.find(
+          (voice) =>
+            voice.lang
+              .toLowerCase() ===
+            "ta-in"
+        ) ||
+        tamilVoices[0];
+
+      if (!tamilVoice) {
+        setVoiceStatus(
+          "Tamil voice not installed. Beep works, but Tamil Speech Voice is missing."
+        );
+
+        console.warn(
+          "No Tamil voice available."
+        );
+
+        return;
+      }
+
+      const name =
+        current.student.voiceName?.trim() ||
+        current.student.name;
+
+      const text =
+        `${name}, உங்கள் பேருந்து எச்சரிக்கை. தயாராக இருங்கள்.`;
+
+      /*
+       * Cancel any previous speech.
+       */
+
+      synth.cancel();
+
+      /*
+       * Small delay helps Chrome/Edge
+       * after cancel().
+       */
+
+      await new Promise<void>(
+        (resolve) => {
+          window.setTimeout(
+            resolve,
+            120
+          );
+        }
+      );
+
+      const utterance =
+        new SpeechSynthesisUtterance(
+          text
+        );
+
+      utterance.lang =
+        "ta-IN";
+
+      utterance.voice =
+        tamilVoice;
+
+      utterance.volume =
+        soundSettingsRef.current.volume;
+
+      utterance.rate = 0.88;
+      utterance.pitch = 1;
+
+      utterance.onstart = () => {
+        setVoiceStatus(
+          `Speaking Tamil using: ${tamilVoice.name} (${tamilVoice.lang})`
+        );
+      };
+
+      utterance.onend = () => {
+        setVoiceStatus(
+          `Tamil voice working: ${tamilVoice.name} (${tamilVoice.lang})`
+        );
+      };
+
+      utterance.onerror = (
+        event
+      ) => {
+        console.error(
+          "Tamil voice test error:",
+          event
+        );
+
+        setVoiceStatus(
+          `Tamil voice error: ${event.error}`
+        );
+      };
+
+      synth.speak(utterance);
+
+      /*
+       * Some Chromium versions can keep
+       * speechSynthesis paused.
+       */
+
+      window.setTimeout(() => {
+        if (synth.paused) {
+          synth.resume();
+        }
+      }, 250);
+    }, [
+      playBeep,
+      unlockAudio,
+      waitForVoices,
+    ]);
+
+  /*
+   * ---------------------------------------------------------
+   * DASHBOARD API
+   * ---------------------------------------------------------
+   */
+
+  const loadDashboard =
+    useCallback(async () => {
+      try {
+        setError("");
+
+        const response =
+          await fetch(
+            "/api/student/dashboard",
+            {
+              method: "GET",
+              credentials: "include",
+              cache: "no-store",
+            }
+          );
 
         const result =
           await response.json();
@@ -256,25 +1124,33 @@ export default function StudentDashboardPage() {
           response.status === 401 ||
           response.status === 403
         ) {
-          router.replace("/student/login");
+          router.replace(
+            "/student/login"
+          );
+
           return;
         }
 
-        if (!response.ok || !result.success) {
+        if (
+          !response.ok ||
+          !result.success
+        ) {
           setError(
             result.message ||
               "Dashboard load failed."
           );
+
           return;
         }
 
         setData(result);
 
+        dataRef.current =
+          result;
+
         setNotifications(
-          result.notifications?.map(
-            (item: StudentNotification) =>
-              item
-          ) ?? []
+          result.notifications ||
+            []
         );
 
         if (
@@ -283,21 +1159,35 @@ export default function StudentDashboardPage() {
           result.assignment?.bus
         ) {
           setLiveLocation({
-            tripId: result.trip.id,
+            tripId:
+              result.trip.id,
+
             busId:
               result.assignment.bus.id,
+
             latitude:
-              result.latestLocation.latitude,
+              result.latestLocation
+                .latitude,
+
             longitude:
-              result.latestLocation.longitude,
+              result.latestLocation
+                .longitude,
+
             accuracy:
-              result.latestLocation.accuracy,
+              result.latestLocation
+                .accuracy,
+
             speed:
-              result.latestLocation.speed,
+              result.latestLocation
+                .speed,
+
             heading:
-              result.latestLocation.heading,
+              result.latestLocation
+                .heading,
+
             recordedAt:
-              result.latestLocation.recordedAt,
+              result.latestLocation
+                .recordedAt,
           });
         } else {
           setLiveLocation(null);
@@ -311,44 +1201,48 @@ export default function StudentDashboardPage() {
       } finally {
         setLoading(false);
       }
-    },
-    [router]
-  );
+    }, [router]);
 
   useEffect(() => {
-    loadDashboard();
+    void loadDashboard();
   }, [loadDashboard]);
 
   /*
-   * Refresh stale GPS status every 10 seconds.
+   * ---------------------------------------------------------
+   * PERIODIC REFRESH
+   * ---------------------------------------------------------
    */
+
   useEffect(() => {
     const timer =
       window.setInterval(() => {
-        setNow(Date.now());
-      }, 10_000);
+        void loadDashboard();
+      }, 30000);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, []);
+  }, [loadDashboard]);
 
   /*
-   * Socket.IO realtime connection.
+   * ---------------------------------------------------------
+   * SOCKET.IO
+   * ---------------------------------------------------------
    */
+
   useEffect(() => {
     let mounted = true;
 
     async function connectSocket() {
       try {
-        const response = await fetch(
-          "/api/auth/socket-token",
-          {
-            method: "GET",
-            credentials: "include",
-            cache: "no-store",
-          }
-        );
+        const response =
+          await fetch(
+            "/api/auth/socket-token",
+            {
+              credentials: "include",
+              cache: "no-store",
+            }
+          );
 
         const result =
           await response.json();
@@ -357,7 +1251,10 @@ export default function StudentDashboardPage() {
           !response.ok ||
           !result.success
         ) {
-          router.replace("/student/login");
+          router.replace(
+            "/student/login"
+          );
+
           return;
         }
 
@@ -365,220 +1262,235 @@ export default function StudentDashboardPage() {
           return;
         }
 
-        const socket = io(
-          "http://127.0.0.1:4001",
-          {
-            transports: ["websocket"],
+        const socket =
+          io(SOCKET_URL, {
+            transports: [
+              "websocket",
+            ],
             auth: {
-              token: result.token,
+              token:
+                result.token,
             },
+          });
+
+        socketRef.current =
+          socket;
+
+        socket.on(
+          "connect",
+          () => {
+            if (mounted) {
+              setConnected(
+                true
+              );
+            }
           }
         );
 
-        socketRef.current = socket;
-
-        socket.on("connect", () => {
-          if (mounted) {
-            setSocketConnected(true);
+        socket.on(
+          "disconnect",
+          () => {
+            if (mounted) {
+              setConnected(
+                false
+              );
+            }
           }
-        });
-
-        socket.on("disconnect", () => {
-          if (mounted) {
-            setSocketConnected(false);
-          }
-        });
+        );
 
         socket.on(
           "connect_error",
-          (socketError) => {
+          (err) => {
             console.error(
-              "Student Socket Error:",
-              socketError
+              "Student socket error:",
+              err
             );
 
             if (mounted) {
-              setSocketConnected(false);
+              setConnected(
+                false
+              );
             }
           }
         );
 
         /*
-         * Receive only the assigned bus location.
+         * LIVE BUS LOCATION
          */
+
         socket.on(
           "bus:location",
-          (location: LiveBusLocation) => {
-            if (!mounted) {
-              return;
-            }
-
+          (
+            location: LiveLocation
+          ) => {
             const current =
               dataRef.current;
 
             if (
-              !current ||
-              !current.assignment ||
+              !current?.assignment ||
               !current.trip
             ) {
               return;
             }
 
-            const assignedBusId =
-              current.assignment.bus.id;
-
-            const currentTripId =
-              current.trip.id;
-
             if (
               location.busId !==
-                assignedBusId ||
+                current
+                  .assignment
+                  .bus.id ||
               location.tripId !==
-                currentTripId
+                current.trip.id
             ) {
               return;
             }
 
-            setLiveLocation(location);
+            setLiveLocation(
+              location
+            );
           }
         );
 
         /*
-         * Student proximity event.
+         * PROXIMITY
          */
+
         socket.on(
           "student:bus-proximity",
-          (payload: {
-            tripId?: string;
-            distanceMeters?: number;
-            status?: string;
-            notification?: StudentNotification;
-          }) => {
+          (
+            payload: ProximityPayload
+          ) => {
             const current =
               dataRef.current;
 
+            if (!current) {
+              return;
+            }
+
             if (
-              current?.trip &&
               payload.tripId &&
+              current.trip &&
               payload.tripId !==
                 current.trip.id
             ) {
               return;
             }
 
-            if (payload.notification) {
-              setNotifications(
-                (currentNotifications) => {
-                  const incoming =
-                    payload.notification!;
-
-                  if (
-                    incoming.id &&
-                    currentNotifications.some(
-                      (item) =>
-                        item.id ===
-                        incoming.id
-                    )
-                  ) {
-                    return currentNotifications;
-                  }
-
-                  return [
-                    incoming,
-                    ...currentNotifications,
-                  ].slice(0, 20);
-                }
-              );
+            if (
+              payload.studentId &&
+              payload.studentId !==
+                current.student.id
+            ) {
+              return;
             }
 
-            if (payload.status) {
-              setData((currentData) => {
-                if (!currentData) {
-                  return currentData;
+            if (
+              payload.status
+            ) {
+              setData((old) => {
+                if (!old) {
+                  return old;
                 }
 
                 return {
-                  ...currentData,
-                  studentTripStatus: {
-                    status:
-                      payload.status!,
-                    boardedAt:
-                      currentData
-                        .studentTripStatus
-                        ?.boardedAt ??
-                      null,
-                    missedAt:
-                      currentData
-                        .studentTripStatus
-                        ?.missedAt ??
-                      null,
-                  },
+                  ...old,
+
+                  studentTripStatus:
+                    {
+                      status:
+                        payload.status!,
+
+                      boardedAt:
+                        old
+                          .studentTripStatus
+                          ?.boardedAt ??
+                        null,
+
+                      missedAt:
+                        old
+                          .studentTripStatus
+                          ?.missedAt ??
+                        null,
+                    },
                 };
               });
+            }
+
+            if (
+              payload.notificationType &&
+              payload.tripId
+            ) {
+              const key =
+                `${payload.tripId}:${payload.notificationType}`;
+
+              if (
+                !spokenRef.current.has(
+                  key
+                )
+              ) {
+                spokenRef.current.add(
+                  key
+                );
+
+                void speakTamil(
+                  payload.notificationType,
+                  payload.distanceMeters
+                );
+              }
             }
           }
         );
 
         /*
-         * General student notification.
+         * NOTIFICATION
          */
+
         socket.on(
           "student:notification",
           (
             notification: StudentNotification
           ) => {
-            const current =
-              dataRef.current;
-
-            if (
-              current?.trip &&
-              notification.tripId &&
-              notification.tripId !==
-                current.trip.id
-            ) {
-              return;
-            }
-
             setNotifications(
-              (currentNotifications) => {
+              (old) => {
                 if (
-                  notification.id &&
-                  currentNotifications.some(
+                  old.some(
                     (item) =>
                       item.id ===
                       notification.id
                   )
                 ) {
-                  return currentNotifications;
+                  return old;
                 }
 
                 return [
                   notification,
-                  ...currentNotifications,
+                  ...old,
                 ].slice(0, 20);
               }
             );
           }
         );
 
-        /*
-         * Trip started.
-         */
         socket.on(
           "trip:started",
           () => {
-            loadDashboard();
+            spokenRef.current.clear();
+
+            setLiveLocation(
+              null
+            );
+
+            void loadDashboard();
           }
         );
 
-        /*
-         * Trip completed.
-         */
         socket.on(
           "trip:completed",
           () => {
-            setLiveLocation(null);
-            loadDashboard();
+            setLiveLocation(
+              null
+            );
+
+            void loadDashboard();
           }
         );
       } catch (err) {
@@ -589,46 +1501,65 @@ export default function StudentDashboardPage() {
       }
     }
 
-    connectSocket();
+    void connectSocket();
 
     return () => {
       mounted = false;
 
-      if (socketRef.current) {
+      if (
+        socketRef.current
+      ) {
         socketRef.current.disconnect();
-        socketRef.current = null;
+
+        socketRef.current =
+          null;
       }
     };
-  }, [loadDashboard, router]);
+  }, [
+    loadDashboard,
+    router,
+    speakTamil,
+  ]);
 
   /*
-   * Logout.
+   * ---------------------------------------------------------
+   * LOGOUT
+   * ---------------------------------------------------------
    */
-  async function logout() {
-    await fetch(
-      "/api/auth/logout",
-      {
-        method: "POST",
-        credentials: "include",
-      }
-    );
 
-    if (socketRef.current) {
-      socketRef.current.disconnect();
+  async function logout() {
+    try {
+      await fetch(
+        "/api/auth/logout",
+        {
+          method: "POST",
+          credentials: "include",
+        }
+      );
+    } catch {
+      // Continue.
     }
 
-    router.replace("/student/login");
+    socketRef.current?.disconnect();
+
+    router.replace(
+      "/student/login"
+    );
+
     router.refresh();
   }
 
   /*
-   * Loading.
+   * ---------------------------------------------------------
+   * LOADING
+   * ---------------------------------------------------------
    */
+
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 text-white">
         <div className="text-center">
-          <div className="text-4xl">
+          <div className="text-5xl">
             🚌
           </div>
 
@@ -641,20 +1572,33 @@ export default function StudentDashboardPage() {
   }
 
   /*
-   * Error.
+   * ---------------------------------------------------------
+   * ERROR
+   * ---------------------------------------------------------
    */
+
   if (error) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4">
-        <div className="max-w-md rounded-2xl border border-red-500/20 bg-red-500/10 p-6 text-center">
-          <p className="text-red-300">
+        <div className="w-full max-w-md rounded-3xl border border-red-500/20 bg-red-500/10 p-8 text-center">
+          <div className="text-4xl">
+            ⚠️
+          </div>
+
+          <h1 className="mt-4 text-xl font-bold text-white">
+            Dashboard load failed
+          </h1>
+
+          <p className="mt-2 text-sm text-red-200">
             {error}
           </p>
 
           <button
             type="button"
-            onClick={loadDashboard}
-            className="mt-4 rounded-xl bg-blue-600 px-5 py-2 text-white"
+            onClick={() =>
+              void loadDashboard()
+            }
+            className="mt-6 rounded-xl bg-blue-600 px-6 py-3 font-bold text-white hover:bg-blue-500"
           >
             Retry
           </button>
@@ -670,10 +1614,16 @@ export default function StudentDashboardPage() {
   const assignment =
     data.assignment;
 
+  /*
+   * ---------------------------------------------------------
+   * NO ASSIGNMENT
+   * ---------------------------------------------------------
+   */
+
   if (!assignment) {
     return (
       <main className="min-h-screen bg-slate-950 text-white">
-        <header className="border-b border-white/10 bg-slate-900/80">
+        <header className="border-b border-white/10 bg-slate-900">
           <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-xl">
@@ -685,7 +1635,7 @@ export default function StudentDashboardPage() {
                   Student Bus Tracking
                 </h1>
 
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-slate-500">
                   Live tracking system
                 </p>
               </div>
@@ -693,8 +1643,10 @@ export default function StudentDashboardPage() {
 
             <button
               type="button"
-              onClick={logout}
-              className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5"
+              onClick={
+                logout
+              }
+              className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300"
             >
               Logout
             </button>
@@ -702,59 +1654,80 @@ export default function StudentDashboardPage() {
         </header>
 
         <div className="mx-auto max-w-7xl px-4 py-8">
-          <section className="mb-6">
-            <p className="text-sm text-slate-400">
-              Welcome
-            </p>
+          <h2 className="text-3xl font-bold">
+            {data.student.name}
+          </h2>
 
-            <h2 className="text-3xl font-bold">
-              {data.student.name}
-            </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            Student ID:{" "}
+            {data.student.studentId}
+          </p>
 
-            <p className="mt-1 text-sm text-slate-400">
-              Student ID:{" "}
-              {data.student.studentId}
-            </p>
-          </section>
+          <p className="mt-1 text-xs text-slate-500">
+            Tamil voice name:{" "}
+            {data.student.voiceName}
+          </p>
 
-          <section className="rounded-3xl border border-yellow-500/20 bg-yellow-500/10 p-8">
-            <h2 className="text-xl font-bold text-yellow-200">
+          <div className="mt-8 rounded-3xl border border-yellow-500/20 bg-yellow-500/10 p-8">
+            <div className="text-4xl">
+              🚌
+            </div>
+
+            <h2 className="mt-4 text-xl font-bold text-yellow-200">
               Bus assignment இல்லை
             </h2>
 
             <p className="mt-2 text-sm text-yellow-100/70">
-              Admin இன்னும் உங்களுக்கு bus
-              மற்றும் pickup stop assign
-              செய்யவில்லை.
+              உங்கள் account-க்கு bus மற்றும்
+              pickup stop இன்னும் assign
+              செய்யப்படவில்லை.
             </p>
-          </section>
+          </div>
         </div>
       </main>
     );
   }
 
   /*
-   * Correct latest-location fallback.
+   * ---------------------------------------------------------
+   * LOCATION
+   * ---------------------------------------------------------
    */
-  const currentBusLocation =
+
+  const location =
     liveLocation ??
     (data.latestLocation &&
     data.trip
       ? {
-          tripId: data.trip.id,
-          busId: assignment.bus.id,
+          tripId:
+            data.trip.id,
+
+          busId:
+            assignment.bus.id,
+
           latitude:
-            data.latestLocation.latitude,
+            data.latestLocation
+              .latitude,
+
           longitude:
-            data.latestLocation.longitude,
+            data.latestLocation
+              .longitude,
+
           accuracy:
-            data.latestLocation.accuracy,
+            data.latestLocation
+              .accuracy,
+
           speed:
-            data.latestLocation.speed,
+            data.latestLocation
+              .speed,
+
           heading:
-            data.latestLocation.heading,
+            data.latestLocation
+              .heading,
+
           recordedAt:
-            data.latestLocation.recordedAt,
+            data.latestLocation
+              .recordedAt,
         }
       : null);
 
@@ -762,68 +1735,65 @@ export default function StudentDashboardPage() {
     | number
     | null = null;
 
-  if (
-    currentBusLocation &&
-    assignment.stop
-  ) {
+  if (location) {
     distanceToStop =
-      calculateDistanceMeters(
-        currentBusLocation.latitude,
-        currentBusLocation.longitude,
+      distanceMeters(
+        location.latitude,
+        location.longitude,
         assignment.stop.latitude,
         assignment.stop.longitude
       );
   }
 
-  const distanceText =
-    distanceToStop === null
-      ? "—"
-      : distanceToStop >= 1000
-        ? `${(
-            distanceToStop / 1000
-          ).toFixed(2)} km`
-        : `${Math.round(
-            distanceToStop
-          )} m`;
-
-  const studentStatus =
+  const status =
     data.studentTripStatus
-      ?.status ?? "WAITING";
-
-  const isRunning =
-    data.trip?.status === "RUNNING";
-
-  const locationStale =
-    currentBusLocation
-      ? isLocationStale(
-          currentBusLocation.recordedAt,
-          60_000
-        )
-      : true;
-
-  const gpsLevel =
-    getGpsLevel(
-      currentBusLocation?.accuracy
-    );
-
-  const withinOneKm =
-    distanceToStop !== null &&
-    distanceToStop <= 1000 &&
-    isRunning &&
-    !locationStale;
+      ?.status ||
+    "WAITING";
 
   /*
-   * Avoid unused-variable warning while preserving
-   * stale refresh behavior.
+   * IMPORTANT:
+   * Speed is displayed only when
+   * server/driver sends a real speed.
    */
-  void now;
+
+  const speedKmh =
+    location?.speed != null &&
+    Number.isFinite(
+      location.speed
+    ) &&
+    location.speed >= 0
+      ? location.speed * 3.6
+      : null;
+
+  const locationTimestamp =
+    location?.recordedAt
+      ? new Date(
+          location.recordedAt
+        ).getTime()
+      : 0;
+
+  const stale =
+    !locationTimestamp ||
+    now - locationTimestamp >
+      60000;
+
+  const quality =
+    gpsQuality(
+      location?.accuracy
+    );
+
+  const tripRunning =
+    data.trip?.status ===
+    "RUNNING";
 
   return (
     <main className="min-h-screen bg-slate-950 text-white">
-      <header className="border-b border-white/10 bg-slate-900/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4">
+      {/* HEADER */}
+
+      <header className="sticky top-0 z-30 border-b border-white/10 bg-slate-900/90 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-xl">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 text-xl shadow-lg shadow-blue-900/30">
               🚌
             </div>
 
@@ -832,28 +1802,30 @@ export default function StudentDashboardPage() {
                 Student Bus Tracking
               </h1>
 
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-slate-500">
                 Live tracking system
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
-            <div
-              className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                socketConnected
+            <span
+              className={`hidden rounded-full px-3 py-1.5 text-xs font-bold sm:block ${
+                connected
                   ? "bg-emerald-500/10 text-emerald-300"
                   : "bg-red-500/10 text-red-300"
               }`}
             >
-              {socketConnected
+              {connected
                 ? "● Realtime Connected"
                 : "● Realtime Offline"}
-            </div>
+            </span>
 
             <button
               type="button"
-              onClick={logout}
+              onClick={
+                logout
+              }
               className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5"
             >
               Logout
@@ -863,12 +1835,14 @@ export default function StudentDashboardPage() {
       </header>
 
       <div className="mx-auto max-w-7xl px-4 py-6">
+        {/* STUDENT */}
+
         <section className="mb-6">
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-slate-500">
             Welcome
           </p>
 
-          <h2 className="text-3xl font-bold">
+          <h2 className="mt-1 text-3xl font-bold">
             {data.student.name}
           </h2>
 
@@ -876,12 +1850,20 @@ export default function StudentDashboardPage() {
             Student ID:{" "}
             {data.student.studentId}
           </p>
+
+          <p className="mt-1 text-xs text-slate-500">
+            Tamil voice name:{" "}
+            <span className="text-slate-300">
+              {data.student.voiceName}
+            </span>
+          </p>
         </section>
 
-        {/* Assignment cards */}
+        {/* BUS CARDS */}
+
         <section className="grid gap-4 md:grid-cols-3">
           <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-500">
               Assigned Bus
             </p>
 
@@ -895,7 +1877,7 @@ export default function StudentDashboardPage() {
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-500">
               Route
             </p>
 
@@ -909,7 +1891,7 @@ export default function StudentDashboardPage() {
           </div>
 
           <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-500">
               Pickup Stop
             </p>
 
@@ -924,7 +1906,62 @@ export default function StudentDashboardPage() {
           </div>
         </section>
 
-        {/* Live Map */}
+        {/* TRIP STATUS */}
+
+        <section className="mt-6 rounded-3xl border border-blue-500/20 bg-blue-500/10 p-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-wider text-blue-200/50">
+                Your Trip Status
+              </p>
+
+              <h2 className="mt-1 text-3xl font-bold">
+                {status}
+              </h2>
+
+              <p className="mt-2 text-sm text-blue-100/70">
+                {status ===
+                  "WAITING" &&
+                  "உங்கள் பஸ் இன்னும் உங்கள் நிறுத்தத்திற்கு வரவில்லை."}
+
+                {status ===
+                  "APPROACHING" &&
+                  "உங்கள் பஸ் உங்கள் நிறுத்தத்தை நோக்கி வருகிறது."}
+
+                {status ===
+                  "ARRIVED" &&
+                  "உங்கள் பஸ் உங்கள் நிறுத்தத்திற்கு அருகில் வந்துவிட்டது."}
+
+                {status ===
+                  "BOARDED" &&
+                  "நீங்கள் bus-ல் boarded என்று பதிவு செய்யப்பட்டுள்ளது."}
+
+                {status ===
+                  "MISSED" &&
+                  "இந்த trip-க்கு bus missed status பதிவு செய்யப்பட்டுள்ளது."}
+
+                {status ===
+                  "ABSENT" &&
+                  "இந்த trip-க்கு absent status பதிவு செய்யப்பட்டுள்ளது."}
+              </p>
+            </div>
+
+            <div className="rounded-2xl bg-slate-950/40 px-6 py-5 text-center">
+              <p className="text-xs text-slate-500">
+                Bus → Your Pickup Stop
+              </p>
+
+              <p className="mt-1 text-3xl font-bold">
+                {formatDistance(
+                  distanceToStop
+                )}
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* MAP */}
+
         <section className="mt-6 overflow-hidden rounded-3xl border border-white/10 bg-white/5">
           <div className="flex flex-col gap-3 border-b border-white/10 p-5 md:flex-row md:items-center md:justify-between">
             <div>
@@ -932,251 +1969,465 @@ export default function StudentDashboardPage() {
                 🗺️ Live Bus Map
               </h2>
 
-              <p className="mt-1 text-sm text-slate-400">
-                உங்கள் assigned bus மட்டும்
-                realtime-ல் காட்டப்படுகிறது.
+              <p className="mt-1 text-sm text-slate-500">
+                உங்கள் bus-ன் realtime location.
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex gap-2">
               <span
                 className={`rounded-full px-3 py-1 text-xs font-bold ${
-                  locationStale
+                  stale
                     ? "bg-amber-500/10 text-amber-300"
                     : "bg-emerald-500/10 text-emerald-300"
                 }`}
               >
-                {locationStale
+                {stale
                   ? "● GPS STALE"
                   : "● GPS LIVE"}
               </span>
 
               <span className="rounded-full bg-blue-500/10 px-3 py-1 text-xs font-bold text-blue-300">
                 Bus{" "}
-                {assignment.bus.busNumber}
+                {
+                  assignment.bus
+                    .busNumber
+                }
               </span>
             </div>
           </div>
 
-          <div className="h-[420px] w-full">
+          <div className="h-[380px] w-full">
             <StudentMap
               busLocation={
-                currentBusLocation
+                location
               }
               pickupStop={
                 assignment.stop
               }
               busNumber={
-                assignment.bus.busNumber
+                assignment.bus
+                  .busNumber
               }
               registration={
-                assignment.bus.registration
+                assignment.bus
+                  .registration
               }
-              tripRunning={isRunning}
+              tripRunning={
+                tripRunning
+              }
+              studentLocation={
+                data.studentLocation
+              }
+              collegeLocation={
+                data.collegeLocation
+              }
             />
           </div>
 
-          {!currentBusLocation && (
-            <div className="border-t border-yellow-400/10 bg-yellow-500/5 px-5 py-4 text-sm text-yellow-200">
-              🚌 Bus location இன்னும்
-              கிடைக்கவில்லை. Driver trip start
-              செய்து GPS allow செய்ய வேண்டும்.
+          {!location && (
+            <div className="border-t border-yellow-500/10 bg-yellow-500/5 px-5 py-4 text-sm text-yellow-200">
+              🚌 Driver GPS location
+              இன்னும் கிடைக்கவில்லை.
+            </div>
+          )}
+
+          {location && stale && (
+            <div className="border-t border-amber-500/10 bg-amber-500/5 px-5 py-4 text-sm text-amber-200">
+              ⚠️ Last GPS update
+              1 minute-க்கு மேல்
+              பழையது.
             </div>
           )}
         </section>
 
-        {/* Proximity + Trip Status */}
-        <section className="mt-6 grid gap-6 lg:grid-cols-2">
-          <div
-            className={`rounded-3xl border p-6 ${
-              withinOneKm
-                ? "border-emerald-400/30 bg-emerald-500/10"
-                : "border-white/10 bg-white/5"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-slate-400">
-                  Bus → Your Pickup Stop
-                </p>
+        {/* LIVE DATA */}
 
-                <h2 className="mt-2 text-4xl font-bold">
-                  {distanceText}
-                </h2>
-              </div>
-
-              <div className="text-4xl">
-                {withinOneKm
-                  ? "🔔"
-                  : "🚌"}
-              </div>
-            </div>
-
-            {withinOneKm ? (
-              <div className="mt-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-4">
-                <p className="font-bold text-emerald-200">
-                  Bus 1 KM-க்குள் வந்துவிட்டது!
-                </p>
-
-                <p className="mt-1 text-sm text-emerald-100/70">
-                  உங்கள் pickup stop-க்கு
-                  தயாராக இருங்கள்.
-                </p>
-              </div>
-            ) : (
-              <p className="mt-4 text-sm text-slate-400">
-                {distanceToStop === null
-                  ? "Bus location waiting..."
-                  : distanceToStop <= 1000
-                    ? "Bus 1 KM-க்குள் உள்ளது."
-                    : "Bus இன்னும் 1 KM-க்கு மேல் தொலைவில் உள்ளது."}
-              </p>
-            )}
-
-            <div className="mt-5 grid grid-cols-2 gap-3">
-              <div className="rounded-xl bg-slate-900 p-4">
-                <p className="text-xs text-slate-500">
-                  GPS Status
-                </p>
-
-                <p
-                  className={`mt-1 text-sm font-semibold ${
-                    locationStale
-                      ? "text-amber-300"
-                      : gpsLevel === "GOOD"
-                        ? "text-emerald-300"
-                        : gpsLevel === "FAIR"
-                          ? "text-yellow-300"
-                          : "text-red-300"
-                  }`}
-                >
-                  {locationStale
-                    ? "STALE"
-                    : gpsLevel}
-                </p>
-              </div>
-
-              <div className="rounded-xl bg-slate-900 p-4">
-                <p className="text-xs text-slate-500">
-                  Accuracy
-                </p>
-
-                <p className="mt-1 text-sm">
-                  {currentBusLocation?.accuracy !=
-                  null
-                    ? `${Math.round(
-                        currentBusLocation.accuracy
-                      )} m`
-                    : "—"}
-                </p>
-              </div>
-
-              <div className="rounded-xl bg-slate-900 p-4">
-                <p className="text-xs text-slate-500">
-                  Speed
-                </p>
-
-                <p className="mt-1 text-sm">
-                  {currentBusLocation?.speed !=
-                  null
-                    ? `${currentBusLocation.speed.toFixed(
-                        1
-                      )} m/s`
-                    : "—"}
-                </p>
-              </div>
-
-              <div className="rounded-xl bg-slate-900 p-4">
-                <p className="text-xs text-slate-500">
-                  Last GPS
-                </p>
-
-                <p className="mt-1 text-sm">
-                  {currentBusLocation
-                    ? new Date(
-                        currentBusLocation.recordedAt ??
-                          ""
-                      ).toLocaleTimeString(
-                        "en-IN"
-                      )
-                    : "—"}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* Student trip status */}
-          <div className="rounded-3xl border border-white/10 bg-white/5 p-6">
-            <p className="text-sm text-slate-400">
-              Your Trip Status
+        <section className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-xs text-slate-500">
+              📍 Distance
             </p>
 
-            <div className="mt-4 rounded-2xl bg-slate-900 p-6 text-center">
-              <div className="text-5xl">
-                {studentStatus ===
-                "BOARDED"
-                  ? "🟢"
-                  : studentStatus ===
-                      "ARRIVED"
-                    ? "📍"
-                    : studentStatus ===
-                        "APPROACHING"
-                      ? "🚌"
-                      : studentStatus ===
-                          "MISSED"
-                        ? "🔴"
-                        : "⏳"}
-              </div>
+            <p className="mt-2 text-3xl font-bold">
+              {formatDistance(
+                distanceToStop
+              )}
+            </p>
 
-              <h2 className="mt-4 text-2xl font-bold">
-                {studentStatus}
-              </h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Bus →{" "}
+              {assignment.stop.name}
+            </p>
+          </div>
 
-              <p className="mt-2 text-sm text-slate-400">
-                {studentStatus ===
-                  "WAITING" &&
-                  "Bus இன்னும் உங்கள் stop-க்கு வரவில்லை."}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-xs text-slate-500">
+              🚌 Bus Speed
+            </p>
 
-                {studentStatus ===
-                  "APPROACHING" &&
-                  "Bus உங்கள் stop-ஐ நோக்கி வருகிறது."}
+            <p className="mt-2 text-3xl font-bold">
+              {speedKmh !== null
+                ? speedKmh.toFixed(
+                    1
+                  )
+                : "—"}
 
-                {studentStatus ===
-                  "ARRIVED" &&
-                  "Bus உங்கள் stop அருகில் வந்துவிட்டது."}
+              <span className="ml-1 text-sm text-slate-400">
+                km/h
+              </span>
+            </p>
 
-                {studentStatus ===
-                  "BOARDED" &&
-                  "You are marked as boarded."}
+            <p className="mt-1 text-xs text-slate-500">
+              {location?.speed !=
+              null
+                ? `${location.speed.toFixed(1)} m/s`
+                : "Live speed unavailable"}
+            </p>
+          </div>
 
-                {studentStatus ===
-                  "MISSED" &&
-                  "Bus missed status."}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-xs text-slate-500">
+              🎯 GPS Accuracy
+            </p>
 
-                {studentStatus ===
-                  "ABSENT" &&
-                  "Absent status."}
-              </p>
+            <p className="mt-2 text-3xl font-bold">
+              {location?.accuracy !=
+              null
+                ? Math.round(
+                    location.accuracy
+                  )
+                : "—"}
+
+              <span className="ml-1 text-sm text-slate-400">
+                m
+              </span>
+            </p>
+
+            <p className="mt-1 text-xs text-slate-500">
+              {quality}
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
+            <p className="text-xs text-slate-500">
+              📡 Realtime
+            </p>
+
+            <p
+              className={`mt-2 text-xl font-bold ${
+                connected
+                  ? "text-emerald-400"
+                  : "text-red-400"
+              }`}
+            >
+              {connected
+                ? "CONNECTED"
+                : "OFFLINE"}
+            </p>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Socket server
+            </p>
+          </div>
+        </section>
+
+        {/* LAST GPS */}
+
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="flex flex-col gap-2 text-sm md:flex-row md:justify-between">
+            <div>
+              <span className="text-slate-500">
+                Last GPS
+              </span>
+
+              <span className="ml-2 text-slate-300">
+                {formatDate(
+                  location?.recordedAt
+                )}
+              </span>
             </div>
 
-            <div className="mt-5 rounded-2xl border border-blue-500/20 bg-blue-500/10 p-4">
-              <p className="font-semibold text-blue-200">
-                Pickup Location
-              </p>
+            <div>
+              <span className="text-slate-500">
+                GPS status
+              </span>
 
-              <p className="mt-1 text-sm text-blue-100/70">
-                {assignment.stop.name}
-              </p>
-
-              <p className="mt-2 text-xs text-blue-100/50">
-                {assignment.stop.latitude},{" "}
-                {assignment.stop.longitude}
-              </p>
+              <span
+                className={`ml-2 font-semibold ${
+                  stale
+                    ? "text-amber-400"
+                    : "text-emerald-400"
+                }`}
+              >
+                {stale
+                  ? "STALE"
+                  : "LIVE"}
+              </span>
             </div>
           </div>
         </section>
 
-        {/* Notifications */}
+        {/* PICKUP */}
+
+        <section className="mt-6 rounded-3xl border border-blue-500/20 bg-blue-500/10 p-6">
+          <p className="text-sm font-semibold text-blue-200">
+            📍 Pickup Location
+          </p>
+
+          <h2 className="mt-2 text-2xl font-bold">
+            {assignment.stop.name}
+          </h2>
+
+          <p className="mt-2 text-xs text-blue-100/50">
+            {
+              assignment.stop
+                .latitude
+            }
+            ,{" "}
+            {
+              assignment.stop
+                .longitude
+            }
+          </p>
+
+          <div className="mt-5 rounded-2xl bg-slate-950/40 p-5">
+            <p className="text-xs text-blue-100/50">
+              Bus distance
+            </p>
+
+            <p className="mt-1 text-3xl font-bold">
+              {formatDistance(
+                distanceToStop
+              )}
+            </p>
+          </div>
+        </section>
+
+        {/* SOUND */}
+
+        <section className="mt-6 rounded-3xl border border-white/10 bg-white/5 p-6">
+          <div className="flex flex-col gap-4 md:flex-row md:justify-between">
+            <div>
+              <h2 className="text-xl font-bold">
+                🔊 Tamil Notification Voice
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                உங்கள் bus alert-களை
+                Tamil voice-ல்
+                கேட்கலாம்.
+              </p>
+            </div>
+
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-bold ${
+                audioReady
+                  ? "bg-emerald-500/10 text-emerald-300"
+                  : "bg-slate-800 text-slate-400"
+              }`}
+            >
+              {audioReady
+                ? "Audio Ready"
+                : "Voice Locked"}
+            </span>
+          </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <div className="rounded-2xl bg-slate-900 p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-semibold">
+                    🔊 Alert Sound
+                  </p>
+
+                  <p className="mt-1 text-xs text-slate-500">
+                    Bus alert வந்தால்
+                    voice notification.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSoundSettings(
+                      (old) => ({
+                        ...old,
+                        enabled:
+                          !old.enabled,
+                      })
+                    )
+                  }
+                  className={`h-7 w-12 rounded-full p-1 ${
+                    soundSettings.enabled
+                      ? "bg-emerald-500"
+                      : "bg-slate-700"
+                  }`}
+                >
+                  <span
+                    className={`block h-5 w-5 rounded-full bg-white transition ${
+                      soundSettings.enabled
+                        ? "translate-x-5"
+                        : ""
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-slate-900 p-5">
+              <p className="font-semibold">
+                🎙️ Tamil Voice
+              </p>
+
+              <p className="mt-1 text-xs text-slate-500">
+                Voice name:{" "}
+                {
+                  data.student
+                    .voiceName
+                }
+              </p>
+
+              <button
+                type="button"
+                onClick={() =>
+                  void testTamilVoice()
+                }
+                className="mt-4 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold hover:bg-blue-500"
+              >
+                🔊 Test Tamil Voice
+              </button>
+
+              <div className="mt-3 rounded-xl border border-white/5 bg-slate-950 p-3">
+                <p className="text-xs text-slate-500">
+                  Voice status
+                </p>
+
+                <p className="mt-1 text-xs leading-5 text-slate-300">
+                  {voiceStatus}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 rounded-2xl bg-slate-900 p-5">
+            <div className="flex justify-between">
+              <p className="font-semibold">
+                Volume
+              </p>
+
+              <span className="font-bold text-blue-300">
+                {Math.round(
+                  soundSettings.volume *
+                    100
+                )}
+                %
+              </span>
+            </div>
+
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={
+                soundSettings.volume
+              }
+              onChange={(event) =>
+                setSoundSettings(
+                  (old) => ({
+                    ...old,
+                    volume:
+                      Number(
+                        event.target
+                          .value
+                      ),
+                  })
+                )
+              }
+              className="mt-4 w-full accent-blue-500"
+            />
+          </div>
+        </section>
+
+        {/* NOTIFICATION TYPES */}
+
+        <section className="mt-4 grid gap-3 md:grid-cols-3">
+          <label className="flex items-center justify-between rounded-2xl bg-slate-900 p-4">
+            <span className="text-sm">
+              🚌 Approaching
+            </span>
+
+            <input
+              type="checkbox"
+              checked={
+                soundSettings.approaching
+              }
+              onChange={(event) =>
+                setSoundSettings(
+                  (old) => ({
+                    ...old,
+                    approaching:
+                      event.target
+                        .checked,
+                  })
+                )
+              }
+              className="h-5 w-5 accent-blue-500"
+            />
+          </label>
+
+          <label className="flex items-center justify-between rounded-2xl bg-slate-900 p-4">
+            <span className="text-sm">
+              🔔 Nearby
+            </span>
+
+            <input
+              type="checkbox"
+              checked={
+                soundSettings.nearby
+              }
+              onChange={(event) =>
+                setSoundSettings(
+                  (old) => ({
+                    ...old,
+                    nearby:
+                      event.target
+                        .checked,
+                  })
+                )
+              }
+              className="h-5 w-5 accent-blue-500"
+            />
+          </label>
+
+          <label className="flex items-center justify-between rounded-2xl bg-slate-900 p-4">
+            <span className="text-sm">
+              📍 Arrived
+            </span>
+
+            <input
+              type="checkbox"
+              checked={
+                soundSettings.arrived
+              }
+              onChange={(event) =>
+                setSoundSettings(
+                  (old) => ({
+                    ...old,
+                    arrived:
+                      event.target
+                        .checked,
+                  })
+                )
+              }
+              className="h-5 w-5 accent-blue-500"
+            />
+          </label>
+        </section>
+
+        {/* NOTIFICATIONS */}
+
         <section className="mt-6 rounded-3xl border border-white/10 bg-white/5 p-6">
           <div className="flex items-center justify-between">
             <div>
@@ -1184,14 +2435,15 @@ export default function StudentDashboardPage() {
                 Notifications
               </h2>
 
-              <p className="text-sm text-slate-400">
-                Bus proximity and trip
-                updates
+              <p className="mt-1 text-sm text-slate-500">
+                Bus proximity alerts
               </p>
             </div>
 
-            <span className="rounded-full bg-blue-500/10 px-3 py-1 text-xs text-blue-300">
-              {notifications.length}
+            <span className="rounded-full bg-blue-500/10 px-3 py-1 text-xs font-bold text-blue-300">
+              {
+                notifications.length
+              }
             </span>
           </div>
 
@@ -1204,45 +2456,35 @@ export default function StudentDashboardPage() {
             <div className="mt-5 space-y-3">
               {notifications.map(
                 (
-                  notification,
-                  index
+                  notification
                 ) => (
                   <div
                     key={
-                      notification.id ??
-                      `${notification.type}-${notification.createdAt}-${index}`
+                      notification.id
                     }
                     className="rounded-2xl border border-white/5 bg-slate-900 p-4"
                   >
-                    <div className="flex items-start gap-3">
-                      <div className="text-xl">
-                        {notification.type ===
-                          "BUS_APPROACHING" &&
-                          "🚌"}
-
-                        {notification.type ===
-                          "BUS_NEAR" &&
-                          "🔔"}
-
-                        {notification.type ===
-                          "BUS_ARRIVING" &&
-                          "📍"}
-
-                        {![
-                          "BUS_APPROACHING",
-                          "BUS_NEAR",
-                          "BUS_ARRIVING",
-                        ].includes(
+                    <div className="flex gap-3">
+                      <div className="text-2xl">
+                        {notificationIcon(
                           notification.type
-                        ) && "🔔"}
+                        )}
                       </div>
 
                       <div className="min-w-0 flex-1">
-                        <p className="font-semibold">
-                          {
-                            notification.title
-                          }
-                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold">
+                            {
+                              notification.title
+                            }
+                          </p>
+
+                          {!notification.read && (
+                            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-bold text-blue-300">
+                              NEW
+                            </span>
+                          )}
+                        </div>
 
                         <p className="mt-1 text-sm text-slate-400">
                           {
@@ -1250,15 +2492,11 @@ export default function StudentDashboardPage() {
                           }
                         </p>
 
-                        {notification.createdAt && (
-                          <p className="mt-2 text-xs text-slate-600">
-                            {new Date(
-                              notification.createdAt
-                            ).toLocaleString(
-                              "en-IN"
-                            )}
-                          </p>
-                        )}
+                        <p className="mt-2 text-xs text-slate-600">
+                          {formatDate(
+                            notification.createdAt
+                          )}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -1267,6 +2505,10 @@ export default function StudentDashboardPage() {
             </div>
           )}
         </section>
+
+        <footer className="py-8 text-center text-xs text-slate-600">
+          Live Student Bus Tracking
+        </footer>
       </div>
     </main>
   );

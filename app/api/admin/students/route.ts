@@ -7,11 +7,83 @@ import { getSession } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
+const locationFieldsSchema = z
+  .object({
+    locationName: z.string().trim().max(150).optional().default(""),
+    address: z.string().trim().max(300).optional().default(""),
+    latitude: z.string().trim().optional().default(""),
+    longitude: z.string().trim().optional().default(""),
+  })
+  .superRefine((value, ctx) => {
+    const hasLatitude = value.latitude.length > 0;
+    const hasLongitude = value.longitude.length > 0;
+
+    if (hasLatitude !== hasLongitude) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["latitude"],
+        message: "Latitude and longitude must be provided together.",
+      });
+
+      return;
+    }
+
+    if (!hasLatitude && !hasLongitude) {
+      return;
+    }
+
+    const latitude = Number(value.latitude);
+    const longitude = Number(value.longitude);
+
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["latitude"],
+        message: "Latitude must be between -90 and 90.",
+      });
+    }
+
+    if (
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["longitude"],
+        message: "Longitude must be between -180 and 180.",
+      });
+    }
+
+    if (!value.locationName.trim()) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["locationName"],
+        message: "Location name is required when coordinates are provided.",
+      });
+    }
+  });
+
 const createStudentSchema = z.object({
-  studentId: z.string().trim().min(1, "Student ID is required").max(50),
+  studentId: z
+    .string()
+    .trim()
+    .min(1, "Student ID is required")
+    .max(50),
   name: z.string().trim().min(2, "Student name is required").max(100),
-  username: z.string().trim().min(3, "Username must be at least 3 characters").max(50),
-  password: z.string().min(6, "Password must be at least 6 characters").max(100),
+  username: z
+    .string()
+    .trim()
+    .min(3, "Username must be at least 3 characters")
+    .max(50),
+  password: z
+    .string()
+    .min(6, "Password must be at least 6 characters")
+    .max(100),
+  locationName: z.string().trim().max(150).optional().default(""),
+  address: z.string().trim().max(300).optional().default(""),
+  latitude: z.string().trim().optional().default(""),
+  longitude: z.string().trim().optional().default(""),
 });
 
 const updateStudentSchema = z.object({
@@ -20,7 +92,85 @@ const updateStudentSchema = z.object({
   name: z.string().trim().min(2).max(100),
   username: z.string().trim().min(3).max(50),
   password: z.string().max(100).optional(),
+  locationName: z.string().trim().max(150).optional().default(""),
+  address: z.string().trim().max(300).optional().default(""),
+  latitude: z.string().trim().optional().default(""),
+  longitude: z.string().trim().optional().default(""),
 });
+
+function validateLocationFields(
+  data: {
+    locationName?: string;
+    address?: string;
+    latitude?: string;
+    longitude?: string;
+  },
+  ctx: z.RefinementCtx
+) {
+  const locationName = data.locationName?.trim() ?? "";
+  const latitudeText = data.latitude?.trim() ?? "";
+  const longitudeText = data.longitude?.trim() ?? "";
+
+  const hasLatitude = latitudeText.length > 0;
+  const hasLongitude = longitudeText.length > 0;
+
+  if (hasLatitude !== hasLongitude) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["latitude"],
+      message: "Latitude and longitude must be provided together.",
+    });
+
+    return;
+  }
+
+  if (!hasLatitude && !hasLongitude) {
+    return;
+  }
+
+  const latitude = Number(latitudeText);
+  const longitude = Number(longitudeText);
+
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["latitude"],
+      message: "Latitude must be between -90 and 90.",
+    });
+  }
+
+  if (
+    !Number.isFinite(longitude) ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["longitude"],
+      message: "Longitude must be between -180 and 180.",
+    });
+  }
+
+  if (!locationName) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["locationName"],
+      message: "Location name is required when coordinates are provided.",
+    });
+  }
+}
+
+const createStudentValidationSchema = createStudentSchema.superRefine(
+  (value, ctx) => {
+    validateLocationFields(value, ctx);
+  }
+);
+
+const updateStudentValidationSchema = updateStudentSchema.superRefine(
+  (value, ctx) => {
+    validateLocationFields(value, ctx);
+  }
+);
 
 async function requireAdmin() {
   const session = await getSession();
@@ -34,6 +184,60 @@ async function requireAdmin() {
   }
 
   return session;
+}
+
+function getLocationData(data: {
+  locationName?: string;
+  address?: string;
+  latitude?: string;
+  longitude?: string;
+}) {
+  const locationName = data.locationName?.trim() ?? "";
+  const address = data.address?.trim() ?? "";
+  const latitudeText = data.latitude?.trim() ?? "";
+  const longitudeText = data.longitude?.trim() ?? "";
+
+  if (!latitudeText && !longitudeText) {
+    return null;
+  }
+
+  return {
+    name: locationName,
+    address: address || null,
+    latitude: Number(latitudeText),
+    longitude: Number(longitudeText),
+    active: true,
+  };
+}
+
+function authErrorResponse(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message === "UNAUTHORIZED") {
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Authentication required.",
+      },
+      { status: 401 }
+    );
+  }
+
+  if (error instanceof Error && error.message === "FORBIDDEN") {
+    return NextResponse.json(
+      {
+        success: false,
+        message: "Administrator access required.",
+      },
+      { status: 403 }
+    );
+  }
+
+  return NextResponse.json(
+    {
+      success: false,
+      message: fallback,
+    },
+    { status: 500 }
+  );
 }
 
 export async function GET() {
@@ -50,6 +254,18 @@ export async function GET() {
             id: true,
             username: true,
             createdAt: true,
+          },
+        },
+        location: {
+          select: {
+            id: true,
+            studentId: true,
+            name: true,
+            address: true,
+            latitude: true,
+            longitude: true,
+            active: true,
+            updatedAt: true,
           },
         },
         assignments: {
@@ -94,27 +310,7 @@ export async function GET() {
   } catch (error) {
     console.error("ADMIN_STUDENTS_GET_ERROR:", error);
 
-    if (error instanceof Error && error.message === "UNAUTHORIZED") {
-      return NextResponse.json(
-        { success: false, message: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    if (error instanceof Error && error.message === "FORBIDDEN") {
-      return NextResponse.json(
-        { success: false, message: "Administrator access required." },
-        { status: 403 }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Unable to load students.",
-      },
-      { status: 500 }
-    );
+    return authErrorResponse(error, "Unable to load students.");
   }
 }
 
@@ -123,19 +319,30 @@ export async function POST(request: Request) {
     await requireAdmin();
 
     const body = await request.json();
-    const result = createStudentSchema.safeParse(body);
+
+    const result = createStudentValidationSchema.safeParse(body);
 
     if (!result.success) {
       return NextResponse.json(
         {
           success: false,
-          message: result.error.issues[0]?.message ?? "Invalid student data.",
+          message:
+            result.error.issues[0]?.message ?? "Invalid student data.",
         },
         { status: 400 }
       );
     }
 
-    const { studentId, name, username, password } = result.data;
+    const {
+      studentId,
+      name,
+      username,
+      password,
+      locationName,
+      address,
+      latitude,
+      longitude,
+    } = result.data;
 
     const existingStudent = await prisma.student.findUnique({
       where: {
@@ -171,6 +378,13 @@ export async function POST(request: Request) {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
+    const locationData = getLocationData({
+      locationName,
+      address,
+      latitude,
+      longitude,
+    });
+
     const student = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
@@ -185,6 +399,13 @@ export async function POST(request: Request) {
           studentId,
           name,
           userId: user.id,
+          ...(locationData
+            ? {
+                location: {
+                  create: locationData,
+                },
+              }
+            : {}),
         },
         include: {
           user: {
@@ -193,6 +414,7 @@ export async function POST(request: Request) {
               username: true,
             },
           },
+          location: true,
         },
       });
     });
@@ -200,7 +422,9 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         success: true,
-        message: "Student created successfully.",
+        message: locationData
+          ? "Student and location created successfully."
+          : "Student created successfully.",
         student,
       },
       { status: 201 }
@@ -208,27 +432,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("ADMIN_STUDENTS_POST_ERROR:", error);
 
-    if (error instanceof Error && error.message === "UNAUTHORIZED") {
-      return NextResponse.json(
-        { success: false, message: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    if (error instanceof Error && error.message === "FORBIDDEN") {
-      return NextResponse.json(
-        { success: false, message: "Administrator access required." },
-        { status: 403 }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Unable to create student.",
-      },
-      { status: 500 }
-    );
+    return authErrorResponse(error, "Unable to create student.");
   }
 }
 
@@ -237,13 +441,15 @@ export async function PUT(request: Request) {
     await requireAdmin();
 
     const body = await request.json();
-    const result = updateStudentSchema.safeParse(body);
+
+    const result = updateStudentValidationSchema.safeParse(body);
 
     if (!result.success) {
       return NextResponse.json(
         {
           success: false,
-          message: result.error.issues[0]?.message ?? "Invalid student data.",
+          message:
+            result.error.issues[0]?.message ?? "Invalid student data.",
         },
         { status: 400 }
       );
@@ -255,6 +461,10 @@ export async function PUT(request: Request) {
       name,
       username,
       password,
+      locationName,
+      address,
+      latitude,
+      longitude,
     } = result.data;
 
     const currentStudent = await prisma.student.findUnique({
@@ -263,6 +473,7 @@ export async function PUT(request: Request) {
       },
       include: {
         user: true,
+        location: true,
       },
     });
 
@@ -319,6 +530,13 @@ export async function PUT(request: Request) {
         ? await bcrypt.hash(password, 12)
         : undefined;
 
+    const locationData = getLocationData({
+      locationName,
+      address,
+      latitude,
+      longitude,
+    });
+
     const student = await prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: {
@@ -330,13 +548,38 @@ export async function PUT(request: Request) {
         },
       });
 
-      return tx.student.update({
+      await tx.student.update({
         where: {
           id,
         },
         data: {
           studentId,
           name,
+        },
+      });
+
+      if (locationData) {
+        await tx.studentLocation.upsert({
+          where: {
+            studentId: id,
+          },
+          create: {
+            studentId: id,
+            ...locationData,
+          },
+          update: {
+            name: locationData.name,
+            address: locationData.address,
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            active: true,
+          },
+        });
+      }
+
+      return tx.student.findUniqueOrThrow({
+        where: {
+          id,
         },
         include: {
           user: {
@@ -345,39 +588,22 @@ export async function PUT(request: Request) {
               username: true,
             },
           },
+          location: true,
         },
       });
     });
 
     return NextResponse.json({
       success: true,
-      message: "Student updated successfully.",
+      message: locationData
+        ? "Student and location updated successfully."
+        : "Student updated successfully.",
       student,
     });
   } catch (error) {
     console.error("ADMIN_STUDENTS_PUT_ERROR:", error);
 
-    if (error instanceof Error && error.message === "UNAUTHORIZED") {
-      return NextResponse.json(
-        { success: false, message: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    if (error instanceof Error && error.message === "FORBIDDEN") {
-      return NextResponse.json(
-        { success: false, message: "Administrator access required." },
-        { status: 403 }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Unable to update student.",
-      },
-      { status: 500 }
-    );
+    return authErrorResponse(error, "Unable to update student.");
   }
 }
 
@@ -388,6 +614,7 @@ export async function DELETE(request: Request) {
     const body = await request.json();
 
     const id = typeof body?.id === "string" ? body.id : "";
+    const deleteLocation = body?.deleteLocation === true;
 
     if (!id) {
       return NextResponse.json(
@@ -406,6 +633,11 @@ export async function DELETE(request: Request) {
       select: {
         id: true,
         userId: true,
+        location: {
+          select: {
+            id: true,
+          },
+        },
       },
     });
 
@@ -417,6 +649,26 @@ export async function DELETE(request: Request) {
         },
         { status: 404 }
       );
+    }
+
+    if (deleteLocation) {
+      if (!student.location) {
+        return NextResponse.json({
+          success: true,
+          message: "Student has no saved location.",
+        });
+      }
+
+      await prisma.studentLocation.delete({
+        where: {
+          studentId: id,
+        },
+      });
+
+      return NextResponse.json({
+        success: true,
+        message: "Student location removed successfully.",
+      });
     }
 
     await prisma.user.delete({
@@ -432,26 +684,6 @@ export async function DELETE(request: Request) {
   } catch (error) {
     console.error("ADMIN_STUDENTS_DELETE_ERROR:", error);
 
-    if (error instanceof Error && error.message === "UNAUTHORIZED") {
-      return NextResponse.json(
-        { success: false, message: "Authentication required." },
-        { status: 401 }
-      );
-    }
-
-    if (error instanceof Error && error.message === "FORBIDDEN") {
-      return NextResponse.json(
-        { success: false, message: "Administrator access required." },
-        { status: 403 }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        success: false,
-        message: "Unable to delete student.",
-      },
-      { status: 500 }
-    );
+    return authErrorResponse(error, "Unable to delete student.");
   }
 }

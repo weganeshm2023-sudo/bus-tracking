@@ -16,8 +16,9 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  driver       Driver?
-  student      Student?
+  driver          Driver?
+  student         Student?
+  creatorProfile  CreatorProfile?
 
   @@index([role])
   @@index([active])
@@ -27,6 +28,8 @@ model Student {
   id            String                 @id @default(cuid())
   studentId     String                 @unique
   name          String
+  voiceName     String?
+
   userId        String                 @unique
   active        Boolean                @default(true)
   createdAt     DateTime               @default(now())
@@ -36,6 +39,7 @@ model Student {
   user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignments   StudentBusAssignment[]
   tripStatuses  StudentTripStatus[]
+  location      StudentLocation?
 
   @@index([studentId])
   @@index([active])
@@ -157,27 +161,13 @@ model DriverBusAssignment {
 model Trip {
   id              String              @id @default(cuid())
   tripId          String              @unique
-
   busId           String
   driverId        String
   routeId         String
-
-  /*
-   * Daily trip support.
-   *
-   * This is temporarily nullable because existing historical
-   * Trip records do not have a tripDate yet.
-   *
-   * We will safely backfill old records before making this
-   * required for new daily-trip creation.
-   */
   tripDate        DateTime?
-
   status          TripStatus          @default(SCHEDULED)
-
   startedAt       DateTime?
   completedAt     DateTime?
-
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
 
@@ -200,13 +190,11 @@ model LiveLocation {
   id         String   @id @default(cuid())
   tripId     String
   busId      String
-
   latitude   Float
   longitude  Float
   accuracy   Float?
   speed      Float?
   heading    Float?
-
   recordedAt DateTime
   createdAt  DateTime @default(now())
 
@@ -222,12 +210,9 @@ model StudentTripStatus {
   tripId    String
   studentId String
   stopId    String
-
   status    StudentTripState @default(WAITING)
-
   boardedAt DateTime?
   missedAt  DateTime?
-
   createdAt DateTime         @default(now())
   updatedAt DateTime         @updatedAt
 
@@ -236,7 +221,6 @@ model StudentTripStatus {
   trip      Trip             @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
   @@unique([tripId, studentId])
-
   @@index([studentId])
   @@index([tripId])
   @@index([stopId])
@@ -246,14 +230,11 @@ model StudentTripStatus {
 model Notification {
   id        String           @id @default(cuid())
   studentId String
-
   type      NotificationType
   title     String
   message   String
-
   tripId    String?
   read      Boolean          @default(false)
-
   createdAt DateTime         @default(now())
 
   student   Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
@@ -267,19 +248,16 @@ model Emergency {
   tripId     String
   busId      String
   driverId   String
-
   latitude   Float?
   longitude  Float?
-
   status     EmergencyStatus @default(ACTIVE)
   message    String?
-
   createdAt  DateTime        @default(now())
   resolvedAt DateTime?
 
-  bus        Bus             @relation(fields: [busId], references: [id])
-  driver     Driver          @relation(fields: [driverId], references: [id])
-  trip       Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  bus        Bus      @relation(fields: [busId], references: [id])
+  driver     Driver   @relation(fields: [driverId], references: [id])
+  trip       Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
   @@index([tripId])
   @@index([busId])
@@ -287,10 +265,120 @@ model Emergency {
   @@index([status])
 }
 
+model StudentLocation {
+  id         String   @id @default(cuid())
+  studentId  String   @unique
+  name       String
+  address    String?
+  latitude   Float
+  longitude  Float
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  student    Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([active])
+}
+
+model CollegeLocation {
+  id         String   @id @default("main")
+  name       String
+  address    String?
+  latitude   Float
+  longitude  Float
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([active])
+}
+
+/* =========================================================
+   DEVELOPER / CREATOR PROFILE
+   Only the DEVELOPER user owns this profile.
+========================================================= */
+
+model CreatorProfile {
+  id              String   @id @default("main")
+  ownerUserId     String   @unique
+
+  name            String
+  role            String?
+  department      String?
+  college         String?
+  company         String?
+
+  photoUrl        String?
+  companyLogoUrl  String?
+
+  about           String?
+  education       String?
+
+  email           String?
+  github          String?
+  linkedin        String?
+  instagram       String?
+  portfolio       String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  owner           User             @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  skills          CreatorSkill[]
+  projects        CreatorProject[]
+
+  @@index([ownerUserId])
+}
+
+model CreatorSkill {
+  id          String   @id @default(cuid())
+  profileId   String
+  name        String
+  icon        String?
+  sortOrder   Int      @default(0)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profile     CreatorProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+  @@index([active])
+  @@index([sortOrder])
+}
+
+model CreatorProject {
+  id          String   @id @default(cuid())
+  profileId   String
+
+  title       String
+  description String?
+  imageUrl    String?
+  projectUrl  String?
+  githubUrl   String?
+  techStack   String?
+
+  featured    Boolean  @default(false)
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  profile     CreatorProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId])
+  @@index([active])
+  @@index([featured])
+  @@index([sortOrder])
+}
+
 enum UserRole {
   ADMIN
   DRIVER
   STUDENT
+  DEVELOPER
 }
 
 enum BusStatus {
