@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/auth";
 import { getOrCreateTodayTrip } from "@/lib/daily-trip";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const session = await getSession();
@@ -45,10 +47,10 @@ export async function GET() {
     }
 
     /*
-     * session.driverId can be:
+     * session.driverId may be:
      *
-     * 1. internal Driver.id
-     * 2. public Driver.driverId
+     * 1. Driver.id
+     * 2. Driver.driverId
      */
     const driver = await prisma.driver.findFirst({
       where: {
@@ -76,14 +78,6 @@ export async function GET() {
     });
 
     if (!driver) {
-      console.error(
-        "[DRIVER DASHBOARD] DRIVER NOT FOUND:",
-        {
-          sessionDriverId: session.driverId,
-          username: session.username,
-        }
-      );
-
       return NextResponse.json(
         {
           success: false,
@@ -95,7 +89,7 @@ export async function GET() {
 
     /*
      * ---------------------------------------------------------
-     * FIND DRIVER'S ACTIVE BUS
+     * ACTIVE DRIVER -> BUS
      * ---------------------------------------------------------
      */
 
@@ -104,50 +98,11 @@ export async function GET() {
 
     /*
      * ---------------------------------------------------------
-     * FIND TODAY'S EXISTING TRIP
+     * FIND LATEST TRIP FOR ASSIGNED BUS
      * ---------------------------------------------------------
-     *
-     * We first look for today's trip directly.
      */
 
-    let todayTrip = await prisma.trip.findFirst({
-      where: {
-        driverId: driver.id,
-
-        tripDate: {
-          not: null,
-        },
-      },
-
-      orderBy: {
-        createdAt: "desc",
-      },
-
-      include: {
-        bus: true,
-
-        route: {
-          include: {
-            stops: {
-              orderBy: {
-                sequence: "asc",
-              },
-            },
-          },
-        },
-      },
-    });
-
-    /*
-     * ---------------------------------------------------------
-     * CREATE TODAY'S TRIP AUTOMATICALLY
-     * ---------------------------------------------------------
-     *
-     * DriverBusAssignment contains the bus relation.
-     * It does NOT contain route.
-     *
-     * Therefore route is taken from the driver's latest trip.
-     */
+    let todayTrip = null;
 
     if (activeAssignment) {
       const latestTripForBus =
@@ -167,38 +122,39 @@ export async function GET() {
         });
 
       if (latestTripForBus?.routeId) {
-        todayTrip =
+        const createdTrip =
           await getOrCreateTodayTrip({
             busId: activeAssignment.busId,
             driverId: driver.id,
             routeId: latestTripForBus.routeId,
-          }).then(async (trip) => {
-            return prisma.trip.findUnique({
-              where: {
-                id: trip.id,
-              },
+          });
 
-              include: {
-                bus: true,
+        todayTrip =
+          await prisma.trip.findUnique({
+            where: {
+              id: createdTrip.id,
+            },
 
-                route: {
-                  include: {
-                    stops: {
-                      orderBy: {
-                        sequence: "asc",
-                      },
+            include: {
+              bus: true,
+
+              route: {
+                include: {
+                  stops: {
+                    orderBy: {
+                      sequence: "asc",
                     },
                   },
                 },
               },
-            });
+            },
           });
       }
     }
 
     /*
      * ---------------------------------------------------------
-     * BUILD RESPONSE
+     * ACTIVE DRIVER ASSIGNMENTS
      * ---------------------------------------------------------
      */
 
@@ -210,51 +166,280 @@ export async function GET() {
           bus: {
             id: assignment.bus.id,
             busId: assignment.bus.busId,
-            busNumber: assignment.bus.busNumber,
+            busNumber:
+              assignment.bus.busNumber,
             registration:
               assignment.bus.registration,
-            status: assignment.bus.status,
+            status:
+              assignment.bus.status,
           },
         })
       );
 
+    /*
+     * ---------------------------------------------------------
+     * STUDENTS ASSIGNED TO DRIVER BUS
+     * ---------------------------------------------------------
+     */
+
+    let students: Array<{
+      assignmentId: string;
+      student: {
+        id: string;
+        studentId: string;
+        name: string;
+      };
+      bus: {
+        id: string;
+        busId: string;
+        busNumber: string;
+        registration: string;
+      };
+      route: {
+        id: string;
+        routeId: string;
+        name: string;
+      };
+      pickupStop: {
+        id: string;
+        stopId: string;
+        name: string;
+        latitude: number;
+        longitude: number;
+        sequence: number;
+      };
+      studentLocation: {
+        id: string;
+        name: string;
+        address: string | null;
+        latitude: number;
+        longitude: number;
+      } | null;
+    }> = [];
+
+    if (activeAssignment) {
+      const studentAssignments =
+        await prisma.studentBusAssignment.findMany({
+          where: {
+            busId: activeAssignment.busId,
+            active: true,
+          },
+
+          orderBy: {
+            createdAt: "asc",
+          },
+
+          include: {
+            student: true,
+            bus: true,
+            route: true,
+            stop: true,
+          },
+        });
+
+      /*
+       * StudentLocation is queried separately.
+       *
+       * This avoids depending on whether the generated
+       * Prisma Client exposes the relation name on Student.
+       */
+      const studentIds =
+        studentAssignments.map(
+          (item) => item.studentId
+        );
+
+      const locations =
+        studentIds.length > 0
+          ? await prisma.studentLocation.findMany({
+              where: {
+                studentId: {
+                  in: studentIds,
+                },
+                active: true,
+              },
+            })
+          : [];
+
+      const locationMap =
+        new Map(
+          locations.map(
+            (location) => [
+              location.studentId,
+              location,
+            ]
+          )
+        );
+
+      students =
+        studentAssignments.map(
+          (assignment) => {
+            const location =
+              locationMap.get(
+                assignment.studentId
+              );
+
+            return {
+              assignmentId:
+                assignment.id,
+
+              student: {
+                id:
+                  assignment.student.id,
+
+                studentId:
+                  assignment.student.studentId,
+
+                name:
+                  assignment.student.name,
+              },
+
+              bus: {
+                id:
+                  assignment.bus.id,
+
+                busId:
+                  assignment.bus.busId,
+
+                busNumber:
+                  assignment.bus.busNumber,
+
+                registration:
+                  assignment.bus.registration,
+              },
+
+              route: {
+                id:
+                  assignment.route.id,
+
+                routeId:
+                  assignment.route.routeId,
+
+                name:
+                  assignment.route.name,
+              },
+
+              pickupStop: {
+                id:
+                  assignment.stop.id,
+
+                stopId:
+                  assignment.stop.stopId,
+
+                name:
+                  assignment.stop.name,
+
+                latitude:
+                  assignment.stop.latitude,
+
+                longitude:
+                  assignment.stop.longitude,
+
+                sequence:
+                  assignment.stop.sequence,
+              },
+
+              /*
+               * If a personal StudentLocation exists,
+               * use it for the student marker.
+               *
+               * Pickup stop remains available separately.
+               */
+              studentLocation:
+                location
+                  ? {
+                      id:
+                        location.id,
+
+                      name:
+                        location.name,
+
+                      address:
+                        location.address,
+
+                      latitude:
+                        location.latitude,
+
+                      longitude:
+                        location.longitude,
+                    }
+                  : null,
+            };
+          }
+        );
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * TODAY TRIP
+     * ---------------------------------------------------------
+     */
+
     const trips = todayTrip
       ? [
           {
-            id: todayTrip.id,
-            tripId: todayTrip.tripId,
-            tripDate: todayTrip.tripDate,
-            status: todayTrip.status,
-            startedAt: todayTrip.startedAt,
+            id:
+              todayTrip.id,
+
+            tripId:
+              todayTrip.tripId,
+
+            tripDate:
+              todayTrip.tripDate,
+
+            status:
+              todayTrip.status,
+
+            startedAt:
+              todayTrip.startedAt,
+
             completedAt:
               todayTrip.completedAt,
 
             bus: {
-              id: todayTrip.bus.id,
-              busId: todayTrip.bus.busId,
+              id:
+                todayTrip.bus.id,
+
+              busId:
+                todayTrip.bus.busId,
+
               busNumber:
                 todayTrip.bus.busNumber,
+
               registration:
                 todayTrip.bus.registration,
-              status: todayTrip.bus.status,
+
+              status:
+                todayTrip.bus.status,
             },
 
             route: {
-              id: todayTrip.route.id,
+              id:
+                todayTrip.route.id,
+
               routeId:
                 todayTrip.route.routeId,
-              name: todayTrip.route.name,
+
+              name:
+                todayTrip.route.name,
 
               stops:
                 todayTrip.route.stops.map(
                   (stop) => ({
-                    id: stop.id,
-                    stopId: stop.stopId,
-                    name: stop.name,
+                    id:
+                      stop.id,
+
+                    stopId:
+                      stop.stopId,
+
+                    name:
+                      stop.name,
+
                     latitude:
                       stop.latitude,
+
                     longitude:
                       stop.longitude,
+
                     sequence:
                       stop.sequence,
                   })
@@ -265,16 +450,22 @@ export async function GET() {
       : [];
 
     console.log(
-      "[DRIVER DASHBOARD] DRIVER FOUND:",
+      "[DRIVER DASHBOARD] READY:",
       {
-        id: driver.id,
-        driverId: driver.driverId,
-        name: driver.name,
-        assignments:
-          assignments.length,
-        todayTrip:
+        driverId:
+          driver.driverId,
+
+        bus:
+          activeAssignment?.bus
+            ?.busNumber ?? null,
+
+        students:
+          students.length,
+
+        trip:
           todayTrip?.tripId ?? null,
-        todayStatus:
+
+        status:
           todayTrip?.status ?? null,
       }
     );
@@ -283,14 +474,21 @@ export async function GET() {
       success: true,
 
       driver: {
-        id: driver.id,
-        driverId: driver.driverId,
-        name: driver.name,
+        id:
+          driver.id,
+
+        driverId:
+          driver.driverId,
+
+        name:
+          driver.name,
       },
 
       assignments,
 
       trips,
+
+      students,
     });
   } catch (error) {
     console.error(

@@ -5,6 +5,69 @@ import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
+const adminNav = [
+  {
+    label: "Dashboard",
+    href: "/admin/dashboard",
+    icon: "▦",
+  },
+  {
+    label: "Buses",
+    href: "/admin/buses",
+    icon: "🚌",
+  },
+  {
+    label: "Drivers",
+    href: "/admin/drivers",
+    icon: "◉",
+  },
+  {
+    label: "Students",
+    href: "/admin/students",
+    icon: "●",
+  },
+  {
+    label: "Routes & Stops",
+    href: "/admin/routes",
+    icon: "⌁",
+  },
+  {
+    label: "Assignments",
+    href: "/admin/assignments",
+    icon: "↔",
+  },
+  {
+    label: "Trips",
+    href: "/admin/trips",
+    icon: "▶",
+  },
+  {
+    label: "Live Tracking",
+    href: "/admin/live-tracking",
+    icon: "⌖",
+  },
+  {
+    label: "Notifications",
+    href: "/admin/notifications",
+    icon: "♢",
+  },
+  {
+    label: "Emergency",
+    href: "/admin/emergency",
+    icon: "!",
+  },
+  {
+    label: "Reports",
+    href: "/admin/reports",
+    icon: "▤",
+  },
+  {
+    label: "Settings",
+    href: "/admin/settings",
+    icon: "⚙",
+  },
+];
+
 export default async function AdminDashboardPage() {
   const session = await getSession();
 
@@ -80,155 +143,172 @@ export default async function AdminDashboardPage() {
   return (
     <main className="min-h-screen bg-slate-100 text-slate-900">
       <div className="flex min-h-screen">
-        {/* Sidebar */}
-        <aside className="hidden w-64 shrink-0 border-r border-slate-200 bg-slate-950 text-white lg:block">
-          <div className="flex h-full flex-col">
-            {/* Brand */}
-            <div className="border-b border-slate-800 px-6 py-6">
-              <Link
-                href="/admin/dashboard"
-                className="flex items-center gap-3"
-              >
-                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-600 font-bold">
-                  BT
-                </div>
+        {/* =====================================================
+            DESKTOP SIDEBAR
+        ====================================================== */}
+        <aside className="hidden w-72 shrink-0 border-r border-slate-800 bg-slate-950 text-white lg:flex lg:flex-col">
+          {/* Brand */}
+          <div className="border-b border-slate-800 px-6 py-6">
+            <Link
+              href="/admin/dashboard"
+              className="flex items-center gap-3"
+            >
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 font-black">
+                BT
+              </div>
 
-                <div>
-                  <h1 className="font-semibold">
-                    Bus Tracking
-                  </h1>
+              <div className="min-w-0">
+                <h1 className="truncate font-bold">
+                  Bus Tracking
+                </h1>
 
-                  <p className="text-xs text-slate-400">
-                    Administration
-                  </p>
-                </div>
-              </Link>
+                <p className="text-xs text-slate-400">
+                  Administration
+                </p>
+              </div>
+            </Link>
+          </div>
+
+          {/* Navigation */}
+          <nav className="flex-1 overflow-y-auto px-3 py-5">
+            <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
+              Management
+            </p>
+
+            <div className="space-y-1">
+              {adminNav.map((item) => {
+                const active =
+                  item.href === "/admin/dashboard";
+
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={[
+                      "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition",
+                      active
+                        ? "bg-blue-600 text-white shadow-lg shadow-blue-950/30"
+                        : "text-slate-300 hover:bg-slate-900 hover:text-white",
+                    ].join(" ")}
+                  >
+                    <span
+                      className={[
+                        "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs",
+                        active
+                          ? "bg-white/15"
+                          : "bg-slate-900 group-hover:bg-slate-800",
+                      ].join(" ")}
+                    >
+                      {item.icon}
+                    </span>
+
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
             </div>
+          </nav>
 
-            {/* Navigation */}
-            <nav className="flex-1 px-3 py-5">
-              <div className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Overview
-              </div>
+          {/* Account */}
+          <div className="border-t border-slate-800 p-4">
+            <div className="rounded-2xl bg-slate-900 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                Signed in as
+              </p>
 
-              {/* Dashboard */}
-              <Link
-                href="/admin/dashboard"
-                className="block rounded-xl bg-blue-600 px-3 py-2.5 text-sm font-medium transition hover:bg-blue-500"
+              <p className="mt-1 truncate text-sm font-semibold">
+                {session.username}
+              </p>
+
+              <p className="mt-1 text-xs text-blue-400">
+                Administrator
+              </p>
+
+              <form
+                action="/api/auth/logout"
+                method="POST"
+                className="mt-4"
               >
-                Dashboard
-              </Link>
-
-              {/* Buses */}
-              <Link
-                href="/admin/buses"
-                className="mt-1 block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Buses
-              </Link>
-
-              {/* Drivers */}
-              <Link
-                href="/admin/drivers"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Drivers
-              </Link>
-
-              {/* Students */}
-              <Link
-                href="/admin/students"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Students
-              </Link>
-
-              {/* Routes */}
-              <Link
-                href="/admin/routes"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Routes & Stops
-              </Link>
-
-              {/* Assignments */}
-              <Link
-                href="/admin/assignments"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Assignments
-              </Link>
-
-              {/* Live Tracking */}
-              <Link
-                href="/admin/live-tracking"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Live Tracking
-              </Link>
-
-              {/* Trips */}
-              <Link
-                href="/admin/trips"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Trips
-              </Link>
-
-              {/* Notifications */}
-              <Link
-                href="/admin/notifications"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Notifications
-              </Link>
-
-              {/* Emergency */}
-              <Link
-                href="/admin/emergency"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Emergency
-              </Link>
-
-              {/* Reports */}
-              <Link
-                href="/admin/reports"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Reports
-              </Link>
-
-              {/* Settings */}
-              <Link
-                href="/admin/settings"
-                className="block rounded-xl px-3 py-2.5 text-sm text-slate-300 transition hover:bg-slate-900 hover:text-white"
-              >
-                Settings
-              </Link>
-            </nav>
-
-            {/* Signed-in user */}
-            <div className="border-t border-slate-800 p-4">
-              <div className="rounded-xl bg-slate-900 px-4 py-3">
-                <p className="text-xs text-slate-500">
-                  Signed in as
-                </p>
-
-                <p className="mt-1 truncate text-sm font-medium">
-                  {session.username}
-                </p>
-
-                <p className="mt-1 text-xs text-blue-400">
-                  Administrator
-                </p>
-              </div>
+                <button
+                  type="submit"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
+                >
+                  Logout
+                </button>
+              </form>
             </div>
           </div>
         </aside>
 
-        {/* Main */}
+        {/* =====================================================
+            MAIN CONTENT
+        ====================================================== */}
         <section className="min-w-0 flex-1">
+          {/* Mobile / tablet top navigation */}
+          <div className="border-b border-slate-200 bg-slate-950 text-white lg:hidden">
+            <div className="px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <Link
+                  href="/admin/dashboard"
+                  className="flex min-w-0 items-center gap-3"
+                >
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-sm font-black">
+                    BT
+                  </div>
+
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold">
+                      Bus Tracking
+                    </p>
+
+                    <p className="text-[11px] text-slate-400">
+                      Administration
+                    </p>
+                  </div>
+                </Link>
+
+                <form
+                  action="/api/auth/logout"
+                  method="POST"
+                >
+                  <button
+                    type="submit"
+                    className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-900"
+                  >
+                    Logout
+                  </button>
+                </form>
+              </div>
+
+              {/* Mobile horizontal navigation */}
+              <nav className="mt-4 -mx-1 overflow-x-auto pb-1">
+                <div className="flex min-w-max gap-2 px-1">
+                  {adminNav.map((item) => {
+                    const active =
+                      item.href === "/admin/dashboard";
+
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        className={[
+                          "flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold whitespace-nowrap transition",
+                          active
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white",
+                        ].join(" ")}
+                      >
+                        <span>{item.icon}</span>
+                        <span>{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </nav>
+            </div>
+          </div>
+
+          {/* Header */}
           <header className="border-b border-slate-200 bg-white">
             <div className="flex min-h-20 items-center justify-between gap-4 px-5 sm:px-8">
               <div>
@@ -241,22 +321,30 @@ export default async function AdminDashboardPage() {
                 </h2>
               </div>
 
-              <form
-                action="/api/auth/logout"
-                method="POST"
-              >
-                <button
-                  type="submit"
-                  className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+              <div className="hidden items-center gap-3 sm:flex">
+                <span className="rounded-full bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-700">
+                  Admin Online
+                </span>
+
+                <form
+                  action="/api/auth/logout"
+                  method="POST"
                 >
-                  Logout
-                </button>
-              </form>
+                  <button
+                    type="submit"
+                    className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+                  >
+                    Logout
+                  </button>
+                </form>
+              </div>
             </div>
           </header>
 
           <div className="space-y-6 p-5 sm:p-8">
-            {/* Statistics */}
+            {/* =================================================
+                STATISTICS
+            ================================================== */}
             <section>
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
                 <StatCard
@@ -303,7 +391,9 @@ export default async function AdminDashboardPage() {
               </div>
             </section>
 
-            {/* Live Bus Status */}
+            {/* =================================================
+                LIVE BUS STATUS
+            ================================================== */}
             <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               <div className="flex flex-col gap-3 border-b border-slate-200 px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
                 <div>
@@ -419,7 +509,9 @@ export default async function AdminDashboardPage() {
               )}
             </section>
 
-            {/* System Status */}
+            {/* =================================================
+                SYSTEM STATUS
+            ================================================== */}
             <section className="grid gap-4 md:grid-cols-3">
               <SystemCard
                 title="Authentication"
@@ -435,8 +527,8 @@ export default async function AdminDashboardPage() {
 
               <SystemCard
                 title="Realtime"
-                value="Preparing"
-                description="Live GPS and Socket.IO tracking will be connected next."
+                value="Socket.IO"
+                description="Live GPS tracking is available through the realtime tracking service."
               />
             </section>
           </div>
