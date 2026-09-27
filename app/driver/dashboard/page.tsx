@@ -101,7 +101,7 @@ type TrackingError = {
   message?: string;
 };
 
-const SOCKET_URL = "http://127.0.0.1:4001";
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://127.0.0.1:4001";
 
 const GPS_MAX_ACCURACY = 1000;
 const GPS_REFRESH_INTERVAL = 15_000;
@@ -3126,3 +3126,4 @@ export default function DriverDashboardPage() {
     </main>
   );
 }
+

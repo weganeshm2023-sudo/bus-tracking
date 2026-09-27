@@ -467,7 +467,7 @@ export default function LiveTrackingPage() {
 
         const socket =
           io(
-            "http://127.0.0.1:4001",
+            process.env.NEXT_PUBLIC_SOCKET_URL || "http://127.0.0.1:4001",
             {
               auth: {
                 token: data.token,
@@ -1913,3 +1913,5 @@ export default function LiveTrackingPage() {
     </main>
   );
 }
+
+

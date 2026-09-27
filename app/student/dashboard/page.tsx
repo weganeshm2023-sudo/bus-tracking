@@ -157,7 +157,7 @@ const StudentMap = dynamic(
   }
 );
 
-const SOCKET_URL = "http://127.0.0.1:4001";
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || "http://127.0.0.1:4001";
 
 const DEFAULT_SOUND_SETTINGS: SoundSettings = {
   enabled: true,
