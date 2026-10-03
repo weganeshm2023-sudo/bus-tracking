@@ -121,6 +121,38 @@ const io =
   );
 
 /* =========================================================
+   DRIVER LIVE-LOCATION SHARING
+========================================================= */
+
+const liveSharing = new Map<
+  string,
+  {
+    tripId: string;
+    startedAt: string;
+    socketId: string;
+  }
+>();
+
+function busLiveRoom(busInternalId: string) {
+  return `bus-live:${busInternalId}`;
+}
+
+function emitLiveSharingStatus(
+  busInternalId: string,
+  payload: {
+    busId: string;
+    tripId: string;
+    sharing: boolean;
+    startedAt?: string;
+  }
+) {
+  io.to(busLiveRoom(busInternalId)).emit(
+    "bus:sharing-status",
+    payload
+  );
+}
+
+/* =========================================================
    HELPERS
 ========================================================= */
 
@@ -860,6 +892,66 @@ io.on(
     );
 
     /* =======================================================
+       STUDENT JOIN ASSIGNED BUS LIVE-LOCATION ROOM
+    ======================================================= */
+
+    socket.on(
+      "student:join-bus",
+      async (data?: { busId?: unknown }) => {
+        if (
+          session.role !== "STUDENT" ||
+          !session.studentId
+        ) {
+          return;
+        }
+
+        try {
+          const requestedBusId =
+            typeof data?.busId === "string"
+              ? data.busId.trim()
+              : "";
+
+          if (!requestedBusId) return;
+
+          const studentAssignment =
+            await prisma.studentBusAssignment.findFirst({
+              where: {
+                studentId: session.studentId,
+                active: true,
+                busId: requestedBusId,
+              },
+              include: { bus: true },
+            });
+
+          if (!studentAssignment) {
+            socket.emit("bus:sharing-error", {
+              message: "This bus is not assigned to your account.",
+            });
+            return;
+          }
+
+          const room = busLiveRoom(studentAssignment.busId);
+          socket.join(room);
+
+          const currentSharing = liveSharing.get(
+            studentAssignment.busId
+          );
+
+          socket.emit("bus:sharing-status", {
+            busId: studentAssignment.busId,
+            tripId: currentSharing?.tripId ?? "",
+            sharing: Boolean(currentSharing),
+            ...(currentSharing?.startedAt
+              ? { startedAt: currentSharing.startedAt }
+              : {}),
+          });
+        } catch (error) {
+          console.error("STUDENT_JOIN_BUS_SHARE_ERROR:", error);
+        }
+      }
+    );
+
+    /* =======================================================
        DRIVER LOCATION
     ======================================================= */
 
@@ -1118,10 +1210,14 @@ io.on(
           /*
            * Student live tracking.
            */
-          io.emit(
-            "bus:location",
-            livePayload
-          );
+          const sharing = liveSharing.get(assignment.busId);
+
+          if (sharing) {
+            io.to(busLiveRoom(assignment.busId)).emit(
+              "bus:location",
+              livePayload
+            );
+          }
 
           /*
            * Student proximity.
@@ -1516,6 +1612,166 @@ io.on(
     );
 
     /* =======================================================
+       DRIVER START LIVE-LOCATION SHARING
+    ======================================================= */
+
+    socket.on(
+      "driver:start-sharing",
+      async (data: TripRequestData, ack?: SocketAck) => {
+        const reply = (response: AckResponse) => {
+          if (typeof ack === "function") ack(response);
+          if (!response.success) {
+            socket.emit("tracking:error", {
+              message: response.message || "Unable to start live-location sharing.",
+            });
+          }
+        };
+
+        if (session.role !== "DRIVER" || !session.driverId) {
+          reply({ success: false, message: "Driver profile not found." });
+          return;
+        }
+
+        try {
+          const driver = await findDriver(session.driverId);
+          if (!driver) {
+            reply({ success: false, message: "Driver account not found." });
+            return;
+          }
+
+          const assignment = await prisma.driverBusAssignment.findFirst({
+            where: { driverId: driver.id, active: true },
+            include: { bus: true },
+          });
+
+          if (!assignment) {
+            reply({ success: false, message: "No active bus assignment found." });
+            return;
+          }
+
+          const requestedTripId =
+            typeof data?.tripId === "string" ? data.tripId.trim() : "";
+
+          let trip = requestedTripId
+            ? await findTripByIdentifier(requestedTripId)
+            : null;
+
+          if (!trip) {
+            trip = await prisma.trip.findFirst({
+              where: {
+                driverId: driver.id,
+                busId: assignment.busId,
+                status: "RUNNING",
+              },
+              orderBy: { createdAt: "desc" },
+            });
+          }
+
+          if (!trip || trip.driverId !== driver.id || trip.busId !== assignment.busId || trip.status !== "RUNNING") {
+            reply({
+              success: false,
+              message: "Live location can be shared only for this driver's running trip.",
+            });
+            return;
+          }
+
+          const startedAt =
+            liveSharing.get(assignment.busId)?.startedAt ?? new Date().toISOString();
+
+          liveSharing.set(assignment.busId, {
+            tripId: trip.tripId,
+            startedAt,
+            socketId: socket.id,
+          });
+
+          socket.data.liveSharingBusId = assignment.busId;
+
+          emitLiveSharingStatus(assignment.busId, {
+            busId: assignment.busId,
+            tripId: trip.tripId,
+            sharing: true,
+            startedAt,
+          });
+
+          reply({
+            success: true,
+            tripId: trip.tripId,
+            busId: assignment.bus.busId,
+            startedAt,
+          });
+        } catch (error) {
+          console.error("START_LIVE_SHARING_ERROR:", error);
+          reply({ success: false, message: "Unable to start live-location sharing." });
+        }
+      }
+    );
+
+    /* =======================================================
+       DRIVER STOP LIVE-LOCATION SHARING
+    ======================================================= */
+
+    socket.on(
+      "driver:stop-sharing",
+      async (data: TripRequestData, ack?: SocketAck) => {
+        const reply = (response: AckResponse) => {
+          if (typeof ack === "function") ack(response);
+          if (!response.success) {
+            socket.emit("tracking:error", {
+              message: response.message || "Unable to stop live-location sharing.",
+            });
+          }
+        };
+
+        if (session.role !== "DRIVER" || !session.driverId) {
+          reply({ success: false, message: "Driver profile not found." });
+          return;
+        }
+
+        try {
+          const driver = await findDriver(session.driverId);
+          if (!driver) {
+            reply({ success: false, message: "Driver account not found." });
+            return;
+          }
+
+          const assignment = await prisma.driverBusAssignment.findFirst({
+            where: { driverId: driver.id, active: true },
+            include: { bus: true },
+          });
+
+          if (!assignment) {
+            reply({ success: false, message: "No active bus assignment found." });
+            return;
+          }
+
+          const currentSharing = liveSharing.get(assignment.busId);
+          if (!currentSharing) {
+            reply({ success: true, busId: assignment.bus.busId });
+            return;
+          }
+
+          liveSharing.delete(assignment.busId);
+          socket.data.liveSharingBusId = null;
+
+          emitLiveSharingStatus(assignment.busId, {
+            busId: assignment.bus.busId,
+            tripId: currentSharing.tripId,
+            sharing: false,
+          });
+
+          reply({
+            success: true,
+            busId: assignment.bus.busId,
+            tripId: currentSharing.tripId,
+          });
+        } catch (error) {
+          console.error("STOP_LIVE_SHARING_ERROR:", error);
+          reply({ success: false, message: "Unable to stop live-location sharing." });
+        }
+      }
+    );
+
+    /* =======================================================
        DRIVER STOP TRIP
     ======================================================= */
 
@@ -1745,6 +2001,17 @@ io.on(
             }
           );
 
+          const activeSharing = liveSharing.get(assignment.busId);
+          if (activeSharing) {
+            liveSharing.delete(assignment.busId);
+            emitLiveSharingStatus(assignment.busId, {
+              busId: assignment.busId,
+              tripId: activeSharing.tripId,
+              sharing: false,
+            });
+          }
+
+
           const response:
             AckResponse = {
             success: true,
@@ -1819,6 +2086,31 @@ io.on(
     socket.on(
       "disconnect",
       (reason) => {
+        const sharedBusId =
+          socket.data.liveSharingBusId as string | undefined;
+
+        if (sharedBusId) {
+          const activeSharing = liveSharing.get(sharedBusId);
+          if (activeSharing?.socketId === socket.id) {
+            liveSharing.delete(sharedBusId);
+
+            void prisma.bus.findUnique({
+              where: { id: sharedBusId },
+              select: { busId: true },
+            }).then((bus) => {
+              if (bus) {
+                emitLiveSharingStatus(sharedBusId, {
+                  busId: bus.busId,
+                  tripId: activeSharing.tripId,
+                  sharing: false,
+                });
+              }
+            }).catch((error) => {
+              console.error("LIVE_SHARE_DISCONNECT_STATUS_ERROR:", error);
+            });
+          }
+        }
+
         console.log(
           `[SOCKET] ${session.username} disconnected | reason=${reason}`
         );

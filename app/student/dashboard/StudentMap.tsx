@@ -1,17 +1,9 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-
-import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import { useEffect, useRef, useState } from "react";
 
-type LiveBusLocation = {
-  tripId: string;
-  busId: string;
+type LocationLike = {
   latitude: number;
   longitude: number;
   accuracy?: number | null;
@@ -20,285 +12,34 @@ type LiveBusLocation = {
   recordedAt?: string;
 };
 
-type PickupStop = {
-  id: string;
-  stopId: string;
-  name: string;
+type PointLike = {
+  name?: string;
   latitude: number;
   longitude: number;
-  sequence: number;
+  address?: string | null;
 };
 
-type StudentLocation = {
-  id: string;
-  studentId: string;
-  name: string;
-  address: string | null;
-  latitude: number;
-  longitude: number;
-  active: boolean;
-  updatedAt: string;
+type RouteInfo = {
+  distanceMeters: number;
+  durationSeconds: number;
 };
 
-type CollegeLocation = {
-  id: string;
-  name: string;
-  address: string | null;
-  latitude: number;
-  longitude: number;
-  active: boolean;
-  updatedAt: string;
-};
-
-type StudentMapProps = {
-  busLocation: LiveBusLocation | null;
-  pickupStop: PickupStop;
+type Props = {
+  busLocation: LocationLike | null;
+  pickupStop: PointLike;
   busNumber: string;
   registration: string;
   tripRunning: boolean;
-  studentLocation?: StudentLocation | null;
-  collegeLocation?: CollegeLocation | null;
+  studentLocation?: PointLike | null;
+  collegeLocation?: PointLike | null;
+  onRouteInfo?: (info: RouteInfo) => void;
 };
 
-type RouteResponse = {
-  code?: string;
-  routes?: Array<{
-    distance: number;
-    duration: number;
-    geometry?: {
-      coordinates: Array<
-        [number, number]
-      >;
-    };
-  }>;
-};
+type LatLng = [number, number];
 
-const FIXED_COLLEGE = {
-  name:
-    "Fatima Michael College of Engineering & Technology",
-  address:
-    "Fatima Michael College of Engineering & Technology",
-  latitude: 9.875728936747167,
-  longitude: 78.27395353731299,
-};
-
-function isStale(
-  recordedAt: string | undefined,
-  maxAgeMs = 60_000
-) {
-  if (!recordedAt) {
-    return true;
-  }
-
-  const timestamp =
-    new Date(recordedAt).getTime();
-
-  if (!Number.isFinite(timestamp)) {
-    return true;
-  }
-
-  return (
-    Date.now() - timestamp >
-    maxAgeMs
-  );
-}
-
-function formatDistance(
-  meters: number | null
-) {
-  if (
-    meters === null ||
-    !Number.isFinite(meters)
-  ) {
-    return "—";
-  }
-
-  if (meters < 1000) {
-    return `${Math.round(meters)} m`;
-  }
-
-  return `${(
-    meters / 1000
-  ).toFixed(2)} km`;
-}
-
-function formatDuration(
-  seconds: number | null
-) {
-  if (
-    seconds === null ||
-    !Number.isFinite(seconds)
-  ) {
-    return "—";
-  }
-
-  const minutes = Math.max(
-    1,
-    Math.round(seconds / 60)
-  );
-
-  if (minutes < 60) {
-    return `${minutes} min`;
-  }
-
-  const hours = Math.floor(
-    minutes / 60
-  );
-
-  const remaining =
-    minutes % 60;
-
-  return remaining > 0
-    ? `${hours}h ${remaining}m`
-    : `${hours}h`;
-}
-
-function getBusIcon(
-  stale: boolean,
-  heading: number | null | undefined
-) {
-  const borderColor = stale
-    ? "#f59e0b"
-    : "#10b981";
-
-  const background = stale
-    ? "#451a03"
-    : "#052e16";
-
-  const safeHeading =
-    typeof heading === "number" &&
-    Number.isFinite(heading)
-      ? heading
-      : 0;
-
-  return L.divIcon({
-    className:
-      "student-live-bus-marker",
-
-    html: `
-      <div
-        style="
-          width:48px;
-          height:48px;
-          border-radius:50%;
-          background:${background};
-          border:3px solid ${borderColor};
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          box-shadow:0 8px 28px rgba(0,0,0,.45);
-        "
-      >
-        <div
-          style="
-            font-size:27px;
-            line-height:1;
-            transform:rotate(${safeHeading}deg);
-            transition:transform .3s ease;
-          "
-        >
-          🚌
-        </div>
-      </div>
-    `,
-
-    iconSize: [48, 48],
-    iconAnchor: [24, 24],
-    popupAnchor: [0, -25],
-  });
-}
-
-function getStopIcon() {
-  return L.divIcon({
-    className:
-      "student-pickup-marker",
-
-    html: `
-      <div
-        style="
-          width:42px;
-          height:42px;
-          border-radius:50%;
-          background:#172554;
-          border:3px solid #60a5fa;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          font-size:23px;
-          box-shadow:0 8px 25px rgba(0,0,0,.45);
-        "
-      >
-        📍
-      </div>
-    `,
-
-    iconSize: [42, 42],
-    iconAnchor: [21, 21],
-    popupAnchor: [0, -22],
-  });
-}
-
-function getStudentIcon() {
-  return L.divIcon({
-    className:
-      "student-location-marker",
-
-    html: `
-      <div
-        style="
-          width:46px;
-          height:46px;
-          border-radius:50%;
-          background:#2563eb;
-          border:4px solid white;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          font-size:23px;
-          box-shadow:
-            0 8px 25px rgba(37,99,235,.45);
-        "
-      >
-        👤
-      </div>
-    `,
-
-    iconSize: [46, 46],
-    iconAnchor: [23, 23],
-    popupAnchor: [0, -24],
-  });
-}
-
-function getCollegeIcon() {
-  return L.divIcon({
-    className:
-      "college-location-marker",
-
-    html: `
-      <div
-        style="
-          width:48px;
-          height:48px;
-          border-radius:50%;
-          background:#7c3aed;
-          border:4px solid white;
-          display:flex;
-          align-items:center;
-          justify-content:center;
-          font-size:24px;
-          box-shadow:
-            0 8px 25px rgba(124,58,237,.45);
-        "
-      >
-        🏫
-      </div>
-    `,
-
-    iconSize: [48, 48],
-    iconAnchor: [24, 24],
-    popupAnchor: [0, -25],
-  });
-}
+const ROUTER = "https://router.project-osrm.org/route/v1/driving";
+const ROUTE_REFRESH_MS = 7000;
+const ROUTE_MOVE_THRESHOLD_M = 80;
 
 export default function StudentMap({
   busLocation,
@@ -308,938 +49,643 @@ export default function StudentMap({
   tripRunning,
   studentLocation,
   collegeLocation,
-}: StudentMapProps) {
-  const containerRef =
-    useRef<HTMLDivElement | null>(null);
+  onRouteInfo,
+}: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<any>(null);
+  const busMarkerRef = useRef<any>(null);
+  const routeLineRef = useRef<any>(null);
+  const accuracyCircleRef = useRef<any>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const lastRouteAtRef = useRef(0);
+  const lastRouteOriginRef = useRef<LatLng | null>(null);
+  const routeRequestRef = useRef(0);
+  const firstFitRef = useRef(false);
+  const [followBus, setFollowBus] = useState(true);
+  const [mapReady, setMapReady] = useState(false);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState("");
+  const followRef = useRef(true);
 
-  const mapRef =
-    useRef<L.Map | null>(null);
-
-  const busMarkerRef =
-    useRef<L.Marker | null>(null);
-
-  const stopMarkerRef =
-    useRef<L.Marker | null>(null);
-
-  const studentMarkerRef =
-    useRef<L.Marker | null>(null);
-
-  const collegeMarkerRef =
-    useRef<L.Marker | null>(null);
-
-  const accuracyCircleRef =
-    useRef<L.Circle | null>(null);
-
-  const routeLineRef =
-    useRef<L.Polyline | null>(null);
-
-  const firstMapFitRef =
-    useRef(false);
-
-  const routeRequestRef =
-    useRef<AbortController | null>(null);
-
-  const lastRouteRequestRef =
-    useRef(0);
-
-  const lastRouteBusPositionRef =
-    useRef<{
-      latitude: number;
-      longitude: number;
-    } | null>(null);
-
-  const [routeDistance, setRouteDistance] =
-    useState<number | null>(null);
-
-  const [routeDuration, setRouteDuration] =
-    useState<number | null>(null);
-
-  const [routeLoading, setRouteLoading] =
-    useState(false);
-
-  const [routeAvailable, setRouteAvailable] =
-    useState(false);
-
-  const fixedCollege =
-    collegeLocation ?? {
-      id: "main",
-      name: FIXED_COLLEGE.name,
-      address: FIXED_COLLEGE.address,
-      latitude:
-        FIXED_COLLEGE.latitude,
-      longitude:
-        FIXED_COLLEGE.longitude,
-      active: true,
-      updatedAt: "",
-    };
-
-  const targetStudent =
-    studentLocation?.active
-      ? studentLocation
-      : null;
-
-  /*
-   * Create map.
-   */
   useEffect(() => {
-    if (
-      !containerRef.current ||
-      mapRef.current
-    ) {
-      return;
-    }
+    followRef.current = followBus;
+  }, [followBus]);
 
-    const initialCenter =
-      targetStudent
-        ? [
-            targetStudent.latitude,
-            targetStudent.longitude,
-          ] as L.LatLngExpression
-        : [
-            pickupStop.latitude,
-            pickupStop.longitude,
-          ] as L.LatLngExpression;
-
-    const map = L.map(
-      containerRef.current,
-      {
-        center: initialCenter,
-        zoom: 14,
-        zoomControl: true,
-        attributionControl: true,
-      }
-    );
-
-    L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      {
-        maxZoom: 19,
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-      }
-    ).addTo(map);
-
-    mapRef.current = map;
-
-    const resizeTimer =
-      window.setTimeout(() => {
-        map.invalidateSize();
-      }, 250);
-
-    return () => {
-      window.clearTimeout(
-        resizeTimer
-      );
-
-      routeRequestRef.current?.abort();
-
-      if (mapRef.current) {
-        mapRef.current.remove();
-        mapRef.current = null;
-      }
-
-      busMarkerRef.current = null;
-      stopMarkerRef.current = null;
-      studentMarkerRef.current = null;
-      collegeMarkerRef.current = null;
-      accuracyCircleRef.current = null;
-      routeLineRef.current = null;
-    };
-  }, []);
-
-  /*
-   * Update pickup stop marker.
-   */
   useEffect(() => {
-    const map = mapRef.current;
+    let cancelled = false;
 
-    if (!map) {
-      return;
-    }
+    async function createMap() {
+      if (!containerRef.current || mapRef.current) return;
 
-    const stopPosition:
-      L.LatLngExpression = [
+      const L = await import("leaflet");
+      if (cancelled || !containerRef.current) return;
+
+      const defaultCenter: LatLng = [
         pickupStop.latitude,
         pickupStop.longitude,
       ];
 
-    const popupContent = `
-      <div style="min-width:190px">
-        <strong>📍 Pickup Stop</strong>
-        <br/>
-        ${pickupStop.name}
-        <br/>
-        <small>
-          Stop ${pickupStop.sequence}
-        </small>
-      </div>
-    `;
-
-    if (!stopMarkerRef.current) {
-      stopMarkerRef.current =
-        L.marker(
-          stopPosition,
-          {
-            icon: getStopIcon(),
-          }
-        )
-          .addTo(map)
-          .bindPopup(
-            popupContent
-          );
-    } else {
-      stopMarkerRef.current.setLatLng(
-        stopPosition
-      );
-
-      stopMarkerRef.current.setPopupContent(
-        popupContent
-      );
-    }
-  }, [pickupStop]);
-
-  /*
-   * Update individual student location.
-   */
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (!map) {
-      return;
-    }
-
-    if (!targetStudent) {
-      if (studentMarkerRef.current) {
-        studentMarkerRef.current.remove();
-        studentMarkerRef.current = null;
-      }
-
-      return;
-    }
-
-    const studentPosition:
-      L.LatLngExpression = [
-        targetStudent.latitude,
-        targetStudent.longitude,
-      ];
-
-    const popupContent = `
-      <div style="min-width:220px">
-        <strong>🔵 Student Location</strong>
-        <hr style="margin:8px 0"/>
-        <strong>${targetStudent.name}</strong>
-        <br/>
-        ${
-          targetStudent.address ??
-          "Address not available"
-        }
-        <br/>
-        <small>
-          ${targetStudent.latitude.toFixed(6)},
-          ${targetStudent.longitude.toFixed(6)}
-        </small>
-      </div>
-    `;
-
-    if (!studentMarkerRef.current) {
-      studentMarkerRef.current =
-        L.marker(
-          studentPosition,
-          {
-            icon: getStudentIcon(),
-            zIndexOffset: 800,
-          }
-        )
-          .addTo(map)
-          .bindPopup(
-            popupContent
-          );
-    } else {
-      studentMarkerRef.current.setLatLng(
-        studentPosition
-      );
-
-      studentMarkerRef.current.setPopupContent(
-        popupContent
-      );
-    }
-  }, [studentLocation]);
-
-  /*
-   * Fixed college marker.
-   */
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (!map) {
-      return;
-    }
-
-    const collegePosition:
-      L.LatLngExpression = [
-        fixedCollege.latitude,
-        fixedCollege.longitude,
-      ];
-
-    const popupContent = `
-      <div style="min-width:230px">
-        <strong>🏫 Main College</strong>
-        <hr style="margin:8px 0"/>
-        <strong>${fixedCollege.name}</strong>
-        <br/>
-        ${
-          fixedCollege.address ??
-          ""
-        }
-        <br/>
-        <small>
-          ${fixedCollege.latitude.toFixed(6)},
-          ${fixedCollege.longitude.toFixed(6)}
-        </small>
-      </div>
-    `;
-
-    if (!collegeMarkerRef.current) {
-      collegeMarkerRef.current =
-        L.marker(
-          collegePosition,
-          {
-            icon: getCollegeIcon(),
-            zIndexOffset: 700,
-          }
-        )
-          .addTo(map)
-          .bindPopup(
-            popupContent
-          );
-    } else {
-      collegeMarkerRef.current.setLatLng(
-        collegePosition
-      );
-
-      collegeMarkerRef.current.setPopupContent(
-        popupContent
-      );
-    }
-  }, [
-    collegeLocation,
-  ]);
-
-  /*
-   * Live bus marker + GPS accuracy.
-   */
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (!map) {
-      return;
-    }
-
-    if (!busLocation) {
-      if (busMarkerRef.current) {
-        busMarkerRef.current.remove();
-        busMarkerRef.current = null;
-      }
-
-      if (accuracyCircleRef.current) {
-        accuracyCircleRef.current.remove();
-        accuracyCircleRef.current = null;
-      }
-
-      return;
-    }
-
-    const stale = isStale(
-      busLocation.recordedAt,
-      60_000
-    );
-
-    const busPosition:
-      L.LatLngExpression = [
-        busLocation.latitude,
-        busLocation.longitude,
-      ];
-
-    const popupContent = `
-      <div style="min-width:225px">
-        <strong>🚌 Bus ${busNumber}</strong>
-        <br/>
-        ${registration}
-
-        <hr style="margin:8px 0"/>
-
-        <strong>Trip:</strong>
-        ${
-          tripRunning
-            ? "RUNNING"
-            : "NOT RUNNING"
-        }
-
-        <br/>
-
-        <strong>GPS:</strong>
-        ${
-          stale
-            ? "STALE"
-            : "LIVE"
-        }
-
-        <br/>
-
-        <strong>Accuracy:</strong>
-        ${
-          busLocation.accuracy != null
-            ? `${Math.round(
-                busLocation.accuracy
-              )} m`
-            : "—"
-        }
-
-        <br/>
-
-        <strong>Speed:</strong>
-        ${
-          busLocation.speed != null
-            ? `${(
-                busLocation.speed *
-                3.6
-              ).toFixed(1)} km/h`
-            : "—"
-        }
-
-        <br/>
-
-        <strong>Last GPS:</strong>
-        ${
-          busLocation.recordedAt
-            ? new Date(
-                busLocation.recordedAt
-              ).toLocaleTimeString(
-                "en-IN"
-              )
-            : "—"
-        }
-      </div>
-    `;
-
-    if (!busMarkerRef.current) {
-      busMarkerRef.current =
-        L.marker(
-          busPosition,
-          {
-            icon: getBusIcon(
-              stale,
-              busLocation.heading
-            ),
-            zIndexOffset: 1000,
-          }
-        )
-          .addTo(map)
-          .bindPopup(
-            popupContent
-          );
-    } else {
-      busMarkerRef.current.setLatLng(
-        busPosition
-      );
-
-      busMarkerRef.current.setIcon(
-        getBusIcon(
-          stale,
-          busLocation.heading
-        )
-      );
-
-      busMarkerRef.current.setPopupContent(
-        popupContent
-      );
-    }
-
-    /*
-     * GPS accuracy circle.
-     */
-    const accuracy =
-      busLocation.accuracy != null &&
-      Number.isFinite(
-        busLocation.accuracy
-      )
-        ? Math.max(
-            10,
-            Math.min(
-              busLocation.accuracy,
-              100000
-            )
-          )
-        : null;
-
-    if (accuracy !== null) {
-      const circleColor = stale
-        ? "#f59e0b"
-        : "#10b981";
-
-      if (
-        !accuracyCircleRef.current
-      ) {
-        accuracyCircleRef.current =
-          L.circle(
-            busPosition,
-            {
-              radius: accuracy,
-              color: circleColor,
-              fillColor:
-                circleColor,
-              fillOpacity: 0.08,
-              weight: 1,
-            }
-          ).addTo(map);
-      } else {
-        accuracyCircleRef.current.setLatLng(
-          busPosition
-        );
-
-        accuracyCircleRef.current.setRadius(
-          accuracy
-        );
-
-        accuracyCircleRef.current.setStyle(
-          {
-            color: circleColor,
-            fillColor:
-              circleColor,
-          }
-        );
-      }
-    } else if (
-      accuracyCircleRef.current
-    ) {
-      accuracyCircleRef.current.remove();
-
-      accuracyCircleRef.current =
-        null;
-    }
-
-    /*
-     * First live GPS:
-     * show bus + student + college.
-     */
-    if (
-      !firstMapFitRef.current
-    ) {
-      firstMapFitRef.current =
-        true;
-
-      const points: L.LatLngExpression[] =
-        [
-          [
-            busLocation.latitude,
-            busLocation.longitude,
-          ],
-          [
-            fixedCollege.latitude,
-            fixedCollege.longitude,
-          ],
-        ];
-
-      if (targetStudent) {
-        points.push([
-          targetStudent.latitude,
-          targetStudent.longitude,
-        ]);
-      } else {
-        points.push([
-          pickupStop.latitude,
-          pickupStop.longitude,
-        ]);
-      }
-
-      const bounds =
-        L.latLngBounds(points);
-
-      map.fitBounds(
-        bounds,
-        {
-          padding: [45, 45],
-          maxZoom: 15,
-        }
-      );
-    }
-  }, [
-    busLocation,
-    busNumber,
-    registration,
-    tripRunning,
-    pickupStop,
-    studentLocation,
-    collegeLocation,
-  ]);
-
-  /*
-   * Road-following route:
-   *
-   * Bus -> Individual Student
-   *
-   * If student location is not available,
-   * fallback to pickup stop.
-   */
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (
-      !map ||
-      !busLocation
-    ) {
-      return;
-    }
-
-    const destination =
-      targetStudent
-        ? {
-            latitude:
-              targetStudent.latitude,
-            longitude:
-              targetStudent.longitude,
-          }
-        : {
-            latitude:
-              pickupStop.latitude,
-            longitude:
-              pickupStop.longitude,
-          };
-
-    const busLatitude =
-      busLocation.latitude;
-
-    const busLongitude =
-      busLocation.longitude;
-
-    const previous =
-      lastRouteBusPositionRef.current;
-
-    /*
-     * Avoid excessive public OSRM requests.
-     *
-     * First request is immediate.
-     * Later requests happen after:
-     * - 5 seconds, or
-     * - bus moved approximately 50m.
-     */
-    const now = Date.now();
-
-    let movedEnough = true;
-
-    if (previous) {
-      const latDiff =
-        busLatitude -
-        previous.latitude;
-
-      const lngDiff =
-        busLongitude -
-        previous.longitude;
-
-      const approximateMeters =
-        Math.sqrt(
-          latDiff * latDiff +
-            lngDiff * lngDiff
-        ) *
-        111000;
-
-      movedEnough =
-        approximateMeters >= 50;
-    }
-
-    const timeEnough =
-      now -
-        lastRouteRequestRef.current >=
-      5000;
-
-    if (
-      previous &&
-      !movedEnough &&
-      !timeEnough
-    ) {
-      return;
-    }
-
-    lastRouteRequestRef.current =
-      now;
-
-    lastRouteBusPositionRef.current = {
-      latitude: busLatitude,
-      longitude: busLongitude,
-    };
-
-    routeRequestRef.current?.abort();
-
-    const controller =
-      new AbortController();
-
-    routeRequestRef.current =
-      controller;
-
-    setRouteLoading(true);
-
-    const url =
-      `https://router.project-osrm.org/route/v1/driving/` +
-      `${busLongitude},${busLatitude};` +
-      `${destination.longitude},${destination.latitude}` +
-      `?overview=full&geometries=geojson&steps=false`;
-
-    fetch(url, {
-      signal:
-        controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(
-            `OSRM HTTP ${response.status}`
-          );
-        }
-
-        return response.json() as Promise<RouteResponse>;
-      })
-      .then((data) => {
-        if (
-          controller.signal.aborted
-        ) {
-          return;
-        }
-
-        const route =
-          data.routes?.[0];
-
-        if (
-          !route ||
-          !route.geometry ||
-          !route.geometry.coordinates?.length
-        ) {
-          setRouteAvailable(false);
-          return;
-        }
-
-        const latLngs =
-          route.geometry.coordinates.map(
-            ([lng, lat]) =>
-              [
-                lat,
-                lng,
-              ] as L.LatLngExpression
-          );
-
-        if (
-          !routeLineRef.current
-        ) {
-          routeLineRef.current =
-            L.polyline(
-              latLngs,
-              {
-                color: "#2563eb",
-                weight: 6,
-                opacity: 0.85,
-                lineCap: "round",
-                lineJoin: "round",
-              }
-            ).addTo(map);
-        } else {
-          routeLineRef.current.setLatLngs(
-            latLngs
-          );
-        }
-
-        setRouteDistance(
-          route.distance
-        );
-
-        setRouteDuration(
-          route.duration
-        );
-
-        setRouteAvailable(true);
-      })
-      .catch((error) => {
-        if (
-          error instanceof
-            DOMException &&
-          error.name ===
-            "AbortError"
-        ) {
-          return;
-        }
-
-        /*
-         * Keep the last successful
-         * route if OSRM temporarily
-         * fails.
-         */
-        setRouteAvailable(
-          Boolean(
-            routeLineRef.current
-          )
-        );
-      })
-      .finally(() => {
-        if (
-          !controller.signal.aborted
-        ) {
-          setRouteLoading(false);
+      const map = L.map(containerRef.current, {
+        center: defaultCenter,
+        zoom: 14,
+        zoomControl: false,
+        preferCanvas: true,
+      });
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap contributors",
+        updateWhenIdle: true,
+        keepBuffer: 2,
+      }).addTo(map);
+
+      L.control.zoom({ position: "topright" }).addTo(map);
+
+      mapRef.current = map;
+      setMapReady(true);
+
+      // Leaflet must measure the final visible container, not the first
+      // render size. This prevents partially laid-out tile grids.
+      requestAnimationFrame(() => {
+        if (mapRef.current === map && map.getContainer().isConnected) {
+          map.invalidateSize(true);
         }
       });
 
-    return () => {
-      controller.abort();
-    };
-  }, [
-    busLocation,
-    pickupStop,
-    studentLocation,
-  ]);
+      window.setTimeout(() => map.invalidateSize(true), 100);
+      window.setTimeout(() => map.invalidateSize(true), 500);
+      window.setTimeout(() => map.invalidateSize(true), 1000);
+      window.setTimeout(() => map.invalidateSize(true), 1800);
+      window.setTimeout(() => map.invalidateSize(true), 2400);
 
-  /*
-   * Keep map correctly sized.
-   */
-  useEffect(() => {
-    const map = mapRef.current;
-
-    if (!map) {
-      return;
+      const resizeObserver = new ResizeObserver(() => {
+        map.invalidateSize(false);
+      });
+      resizeObserver.observe(containerRef.current);
+      (map as any).__studentResizeObserver = resizeObserver;
     }
 
-    const timer =
-      window.setTimeout(() => {
-        map.invalidateSize();
-      }, 100);
+    void createMap();
+
+  return () => {
+      cancelled = true;
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (busMarkerRef.current?.__studentAnimationFrame != null) {
+        cancelAnimationFrame(busMarkerRef.current.__studentAnimationFrame);
+      }
+
+      routeRequestRef.current += 1;
+      if (mapRef.current) {
+        const observer = (mapRef.current as any).__studentResizeObserver;
+        observer?.disconnect();
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+      busMarkerRef.current = null;
+      routeLineRef.current = null;
+      accuracyCircleRef.current = null;
+      firstFitRef.current = false;
+      lastRouteAtRef.current = 0;
+      lastRouteOriginRef.current = null;
+    };
+  }, [pickupStop.latitude, pickupStop.longitude]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+
+    let cancelled = false;
+
+    async function updateMarkers() {
+      const L = await import("leaflet");
+      if (cancelled || !map) return;
+
+      if (!busLocation) {
+        if (busMarkerRef.current) {
+          busMarkerRef.current.remove();
+          busMarkerRef.current = null;
+        }
+        if (accuracyCircleRef.current) {
+          accuracyCircleRef.current.remove();
+          accuracyCircleRef.current = null;
+        }
+        return;
+      }
+
+      const heading =
+        typeof busLocation.heading === "number" &&
+        Number.isFinite(busLocation.heading)
+          ? busLocation.heading
+          : 0;
+
+      const busIcon = L.divIcon({
+        className: "student-live-bus-marker",
+        html: `
+          <div style="position:relative;width:58px;height:58px;display:flex;align-items:center;justify-content:center;">
+            <div style="position:absolute;inset:4px;border-radius:50%;background:rgba(37,99,235,.16);animation:studentBusPulse 1.8s ease-out infinite;"></div>
+            <div style="position:absolute;top:-1px;left:50%;width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;border-bottom:13px solid #22c55e;transform:translateX(-50%) rotate(${heading}deg);transform-origin:50% 29px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.35));"></div>
+            <div style="position:relative;z-index:2;width:44px;height:44px;border-radius:50%;background:#0f172a;border:3px solid #60a5fa;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 25px rgba(0,0,0,.45);font-size:24px;">🚌</div>
+          </div>
+          <style>
+            @keyframes studentBusPulse { 0% { transform:scale(.65); opacity:.8 } 70% { transform:scale(1.15); opacity:0 } 100% { transform:scale(1.15); opacity:0 } }
+          </style>
+        `,
+        iconSize: [58, 58],
+        iconAnchor: [29, 29],
+      });
+
+      const target: LatLng = [busLocation.latitude, busLocation.longitude];
+
+      if (!busMarkerRef.current) {
+        busMarkerRef.current = L.marker(target, {
+          icon: busIcon,
+          zIndexOffset: 1000,
+        })
+          .addTo(map)
+          .bindPopup(
+            `<strong>🚌 Bus ${escapeHtml(busNumber)}</strong><br/>${escapeHtml(registration)}<br/>${tripRunning ? "LIVE TRIP" : "Trip not running"}`
+          );
+      } else {
+        busMarkerRef.current.setIcon(busIcon);
+        animateMarker(busMarkerRef.current, target);
+      }
+
+      if (busLocation.accuracy && busLocation.accuracy > 0) {
+        if (!accuracyCircleRef.current) {
+          accuracyCircleRef.current = L.circle(target, {
+            radius: Math.min(Math.max(busLocation.accuracy, 5), 500),
+            color: "#60a5fa",
+            fillColor: "#60a5fa",
+            fillOpacity: 0.08,
+            weight: 1,
+          }).addTo(map);
+        } else {
+          accuracyCircleRef.current.setLatLng(target);
+          accuracyCircleRef.current.setRadius(
+            Math.min(Math.max(busLocation.accuracy, 5), 500)
+          );
+        }
+      }
+
+      if (!firstFitRef.current) {
+        firstFitRef.current = true;
+        const overviewBounds = L.latLngBounds([
+          target,
+          [pickupStop.latitude, pickupStop.longitude],
+        ]);
+        map.fitBounds(overviewBounds, {
+          padding: [70, 70],
+          maxZoom: 14,
+          animate: true,
+        });
+      } else if (followRef.current) {
+        map.panTo(target, { animate: true, duration: 0.5 });
+      }
+    }
+
+    void updateMarkers();
 
     return () => {
-      window.clearTimeout(timer);
+      cancelled = true;
     };
-  }, []);
+  }, [
+    mapReady,
+    busLocation?.latitude,
+    busLocation?.longitude,
+    busLocation?.accuracy,
+    busLocation?.heading,
+    busNumber,
+    registration,
+    tripRunning,
+  ]);
 
-  const stale =
-    isStale(
-      busLocation?.recordedAt,
-      60_000
-    );
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
 
-  const destinationName =
-    targetStudent
-      ? targetStudent.name
-      : pickupStop.name;
+    let cancelled = false;
+    let stopMarker: any = null;
+    let studentMarker: any = null;
+    let collegeMarker: any = null;
+
+    async function updatePlaces() {
+      const L = await import("leaflet");
+      if (cancelled) return;
+
+      stopMarker?.remove();
+      studentMarker?.remove();
+      collegeMarker?.remove();
+
+      const stopIcon = L.divIcon({
+        className: "student-stop-marker",
+        html: `<div style="width:42px;height:42px;border-radius:50%;background:#f59e0b;border:3px solid white;display:flex;align-items:center;justify-content:center;box-shadow:0 5px 18px rgba(0,0,0,.35);font-size:20px;">📍</div>`,
+        iconSize: [42, 42],
+        iconAnchor: [21, 21],
+      });
+
+      stopMarker = L.marker(
+        [pickupStop.latitude, pickupStop.longitude],
+        { icon: stopIcon, zIndexOffset: 700 }
+      )
+        .addTo(map)
+        .bindPopup(
+          `<strong>📍 Pickup Stop</strong><br/>${escapeHtml(pickupStop.name || "Pickup stop")}`
+        );
+
+      if (studentLocation) {
+        const studentIcon = L.divIcon({
+          className: "student-own-marker",
+          html: `<div style="width:40px;height:40px;border-radius:50%;background:#2563eb;border:3px solid white;display:flex;align-items:center;justify-content:center;box-shadow:0 5px 18px rgba(0,0,0,.35);font-size:19px;">🔵</div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20],
+        });
+        studentMarker = L.marker(
+          [studentLocation.latitude, studentLocation.longitude],
+          { icon: studentIcon, zIndexOffset: 600 }
+        )
+          .addTo(map)
+          .bindPopup("<strong>🔵 Your saved location</strong>");
+      }
+
+      if (collegeLocation) {
+        const collegeIcon = L.divIcon({
+          className: "student-college-marker",
+          html: `<div style="width:40px;height:40px;border-radius:50%;background:#7c3aed;border:3px solid white;display:flex;align-items:center;justify-content:center;box-shadow:0 5px 18px rgba(0,0,0,.35);font-size:19px;">🏫</div>`,
+          iconSize: [40, 40],
+          iconAnchor: [20, 20],
+        });
+        collegeMarker = L.marker(
+          [collegeLocation.latitude, collegeLocation.longitude],
+          { icon: collegeIcon, zIndexOffset: 500 }
+        )
+          .addTo(map)
+          .bindPopup(
+            `<strong>🏫 College</strong><br/>${escapeHtml(collegeLocation.name || "College")}`
+          );
+      }
+    }
+
+    void updatePlaces();
+
+    return () => {
+      cancelled = true;
+      stopMarker?.remove();
+      studentMarker?.remove();
+      collegeMarker?.remove();
+    };
+  }, [
+    mapReady,
+    pickupStop.latitude,
+    pickupStop.longitude,
+    pickupStop.name,
+    studentLocation?.latitude,
+    studentLocation?.longitude,
+    collegeLocation?.latitude,
+    collegeLocation?.longitude,
+    collegeLocation?.name,
+  ]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !busLocation) return;
+
+    const origin: LatLng = [busLocation.latitude, busLocation.longitude];
+    const destination: LatLng = [pickupStop.latitude, pickupStop.longitude];
+    const now = Date.now();
+    const previous = lastRouteOriginRef.current;
+
+    if (previous) {
+      const moved = haversineMeters(
+        previous[0],
+        previous[1],
+        origin[0],
+        origin[1]
+      );
+      if (
+        now - lastRouteAtRef.current < ROUTE_REFRESH_MS &&
+        moved < ROUTE_MOVE_THRESHOLD_M
+      ) {
+        return;
+      }
+    }
+
+    const requestId = ++routeRequestRef.current;
+    lastRouteAtRef.current = now;
+    lastRouteOriginRef.current = origin;
+    setRouteLoading(true);
+    setRouteError("");
+
+    async function fetchRoute() {
+      const map = mapRef.current;
+      if (!map) return;
+
+      try {
+        const url =
+          `${ROUTER}/${origin[1]},${origin[0]};${destination[1]},${destination[0]}` +
+          `?overview=full&geometries=geojson&steps=true&alternatives=false`;
+
+        const response = await fetch(url, {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error(`OSRM ${response.status}`);
+        }
+
+        const result = await response.json();
+        if (requestId !== routeRequestRef.current) return;
+
+        const route = result?.routes?.[0];
+        const coordinates = route?.geometry?.coordinates;
+
+        if (!route || !Array.isArray(coordinates) || !coordinates.length) {
+          throw new Error("No road route returned");
+        }
+
+        const points: LatLng[] = coordinates.map(
+          (pair: [number, number]) => [pair[1], pair[0]]
+        );
+
+        const L = await import("leaflet");
+        const activeMap = mapRef.current;
+
+        // The route request is asynchronous. The component/map can be
+        // recreated while OSRM is responding (React dev mode, navigation,
+        // or a changed pickup stop). Never add a layer to an old Leaflet map.
+        if (
+          requestId !== routeRequestRef.current ||
+          !activeMap ||
+          activeMap !== map ||
+          !activeMap.getContainer?.()?.isConnected
+        ) {
+          return;
+        }
+
+        if (!routeLineRef.current) {
+          routeLineRef.current = L.polyline(points, {
+            color: "#2563eb",
+            weight: 7,
+            opacity: 0.82,
+            lineCap: "round",
+            lineJoin: "round",
+          });
+          routeLineRef.current.addTo(activeMap);
+        } else {
+          routeLineRef.current.setLatLngs(points);
+          if (!activeMap.hasLayer(routeLineRef.current)) {
+            routeLineRef.current.addTo(activeMap);
+          }
+        }
+
+        onRouteInfo?.({
+          distanceMeters: Number(route.distance) || 0,
+          durationSeconds: Number(route.duration) || 0,
+        });
+      } catch (error) {
+        if (requestId !== routeRequestRef.current) return;
+        console.warn("Student road route unavailable", error);
+        setRouteError("Road route temporarily unavailable");
+      } finally {
+        if (requestId === routeRequestRef.current) {
+          setRouteLoading(false);
+        }
+      }
+    }
+
+    void fetchRoute();
+
+    return () => {
+      // Invalidate an in-flight OSRM response before the next effect run.
+      routeRequestRef.current += 1;
+    };
+  }, [
+    mapReady,
+    busLocation?.latitude,
+    busLocation?.longitude,
+    pickupStop.latitude,
+    pickupStop.longitude,
+    onRouteInfo,
+  ]);
+
+  function recenter() {
+    const map = mapRef.current;
+    if (!map) return;
+    followRef.current = true;
+    setFollowBus(true);
+    if (busLocation) {
+      map.setView([busLocation.latitude, busLocation.longitude], 15, {
+        animate: true,
+      });
+    } else {
+      map.setView([pickupStop.latitude, pickupStop.longitude], 14, {
+        animate: true,
+      });
+    }
+  }
+
+  function fitAll() {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const points: LatLng[] = [
+      [pickupStop.latitude, pickupStop.longitude],
+    ];
+
+    if (busLocation) {
+      points.push([busLocation.latitude, busLocation.longitude]);
+    }
+    if (studentLocation) {
+      points.push([studentLocation.latitude, studentLocation.longitude]);
+    }
+    if (collegeLocation) {
+      points.push([collegeLocation.latitude, collegeLocation.longitude]);
+    }
+
+    void import("leaflet").then((L) => {
+      map.fitBounds(L.latLngBounds(points), {
+        padding: [35, 35],
+        maxZoom: 15,
+        animate: true,
+      });
+    });
+  }
 
   return (
-    <div className="relative h-full w-full overflow-hidden">
-      <div
-        ref={containerRef}
-        className="h-full w-full"
-      />
+    <div className="student-map-root relative h-[520px] min-h-[520px] min-w-0 w-full overflow-hidden rounded-xl bg-slate-900">
+      <style>{`
+        .student-map-root .student-leaflet-map,
+        .student-map-root .leaflet-container {
+          width: 100% !important;
+          height: 100% !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
 
-      {/* Map status card */}
-      <div className="pointer-events-none absolute left-3 top-3 z-[1000] w-[calc(100%-24px)] max-w-sm">
-        <div className="rounded-2xl border border-white/10 bg-slate-950/90 p-3 text-white shadow-2xl backdrop-blur-md">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Live Bus Tracking
-              </p>
+        .student-map-root .leaflet-map-pane {
+          position: absolute !important;
+          left: 0 !important;
+          top: 0 !important;
+        }
 
-              <p className="mt-1 text-sm font-bold">
-                🚌 Bus {busNumber}
-              </p>
+        .student-map-root .leaflet-tile-pane {
+          z-index: 200 !important;
+        }
 
-              <p className="text-xs text-slate-400">
-                {registration}
-              </p>
-            </div>
+        .student-map-root .leaflet-tile-container {
+          position: absolute !important;
+          left: 0 !important;
+          top: 0 !important;
+        }
 
-            <div
-              className={`rounded-full px-3 py-1 text-[11px] font-bold ${
-                !busLocation
-                  ? "bg-slate-700 text-slate-300"
-                  : stale
-                    ? "bg-amber-500/15 text-amber-300"
-                    : "bg-emerald-500/15 text-emerald-300"
-              }`}
-            >
-              {!busLocation
-                ? "NO GPS"
-                : stale
-                  ? "STALE"
-                  : "LIVE"}
-            </div>
-          </div>
+        .student-map-root .leaflet-tile {
+          width: 256px !important;
+          height: 256px !important;
+          max-width: none !important;
+          max-height: none !important;
+        }
 
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <div className="rounded-xl bg-white/5 p-2">
-              <p className="text-[10px] uppercase text-slate-500">
-                Destination
-              </p>
+        .student-map-root .leaflet-tile-pane img {
+          max-width: none !important;
+          max-height: none !important;
+        }
 
-              <p className="mt-1 truncate text-xs font-semibold text-slate-200">
-                {destinationName}
-              </p>
-            </div>
+        .student-map-root .leaflet-control-zoom {
+          margin-top: 12px !important;
+          margin-right: 12px !important;
+        }
 
-            <div className="rounded-xl bg-white/5 p-2">
-              <p className="text-[10px] uppercase text-slate-500">
-                Road Distance
-              </p>
+        @media (max-width: 640px) {
+          .student-map-root {
+            height: 440px;
+            min-height: 440px;
+          }
+        }
+      `}</style>
 
-              <p className="mt-1 text-xs font-semibold text-blue-300">
-                {formatDistance(
-                  routeDistance
-                )}
-              </p>
-            </div>
+      <div ref={containerRef} className="student-leaflet-map absolute inset-0 h-full w-full min-h-0 min-w-0" />
 
-            <div className="rounded-xl bg-white/5 p-2">
-              <p className="text-[10px] uppercase text-slate-500">
-                ETA
-              </p>
-
-              <p className="mt-1 text-xs font-semibold text-slate-200">
-                {formatDuration(
-                  routeDuration
-                )}
-              </p>
-            </div>
-
-            <div className="rounded-xl bg-white/5 p-2">
-              <p className="text-[10px] uppercase text-slate-500">
-                Route
-              </p>
-
-              <p className="mt-1 text-xs font-semibold">
-                {routeLoading
-                  ? "Updating..."
-                  : routeAvailable
-                    ? "Road route"
-                    : "Waiting"}
-              </p>
-            </div>
-          </div>
+      <div className="pointer-events-none absolute left-3 top-3 z-[500] flex flex-wrap gap-2">
+        <div className="rounded-full border border-white/15 bg-slate-950/90 px-3 py-2 text-xs font-bold text-white shadow-lg backdrop-blur">
+          🚌 Bus {busNumber}
+        </div>
+        <div
+          className={`rounded-full border px-3 py-2 text-xs font-bold shadow-lg backdrop-blur ${
+            busLocation
+              ? "border-emerald-400/30 bg-emerald-950/90 text-emerald-300"
+              : "border-amber-400/30 bg-amber-950/90 text-amber-300"
+          }`}
+        >
+          {busLocation ? "● LIVE GPS" : "● WAITING FOR GPS"}
         </div>
       </div>
 
-      {/* Map legend */}
-      <div className="pointer-events-none absolute bottom-3 left-3 z-[1000]">
-        <div className="rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-[11px] text-slate-300 shadow-xl backdrop-blur-md">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span>
-              🚌 Bus
-            </span>
+      <div className="absolute bottom-4 left-3 z-[500] flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            setFollowBus((value) => !value);
+          }}
+          className={`rounded-xl border px-3 py-2 text-xs font-bold shadow-lg backdrop-blur ${
+            followBus
+              ? "border-blue-400/40 bg-blue-950/90 text-blue-200"
+              : "border-white/15 bg-slate-950/90 text-slate-200"
+          }`}
+        >
+          {followBus ? "◎ Follow Bus ON" : "◎ Follow Bus OFF"}
+        </button>
+        <button
+          type="button"
+          onClick={recenter}
+          className="rounded-xl border border-white/15 bg-slate-950/90 px-3 py-2 text-xs font-bold text-white shadow-lg backdrop-blur"
+        >
+          ⦿ Recenter Bus
+        </button>
+        <button
+          type="button"
+          onClick={fitAll}
+          className="rounded-xl border border-white/15 bg-slate-950/90 px-3 py-2 text-xs font-bold text-white shadow-lg backdrop-blur"
+        >
+          ⛶ Show All
+        </button>
+      </div>
 
-            <span>
-              🔵 Student
-            </span>
+      <div className="absolute bottom-4 right-3 z-[500] max-w-[220px] rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-right text-[11px] text-slate-300 shadow-lg backdrop-blur">
+        {routeLoading
+          ? "Calculating road route…"
+          : routeError
+            ? routeError
+            : "Road-following live route"}
+      </div>
 
-            <span>
-              🏫 College
-            </span>
-
-            <span>
-              📍 Pickup
-            </span>
-          </div>
-        </div>
+      <div className="pointer-events-none absolute right-3 top-3 z-[500] rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-[11px] text-slate-300 shadow-lg backdrop-blur">
+        <div>📍 Pickup: {pickupStop.name || "Stop"}</div>
+        <div className="mt-1">🚌 {registration}</div>
+        <div className="mt-1">{tripRunning ? "Trip running" : "Trip not running"}</div>
       </div>
     </div>
   );
+}
+
+function animateMarker(marker: any, target: LatLng) {
+  if (!marker) return;
+
+  const start = marker.getLatLng();
+  const startLat = Number(start.lat);
+  const startLng = Number(start.lng);
+  const startTime = performance.now();
+  const duration = 900;
+
+  if (marker.__studentAnimationFrame != null) {
+    cancelAnimationFrame(marker.__studentAnimationFrame);
+  }
+
+  let frameId: number | null = null;
+
+  function frame(now: number) {
+    const progress = Math.min(1, (now - startTime) / duration);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    const lat = startLat + (target[0] - startLat) * eased;
+    const lng = startLng + (target[1] - startLng) * eased;
+    marker.setLatLng([lat, lng]);
+
+    if (progress < 1) {
+      frameId = requestAnimationFrame(frame);
+      marker.__studentAnimationFrame = frameId;
+    } else {
+      frameId = null;
+      marker.__studentAnimationFrame = null;
+    }
+  }
+
+  frameId = requestAnimationFrame(frame);
+  marker.__studentAnimationFrame = frameId;
+}
+
+function haversineMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }

@@ -293,10 +293,7 @@ const StudentMap = dynamic(
 
 
 const SOCKET_URL =
-
-  process.env.NEXT_PUBLIC_SOCKET_URL ||
-
-  "http://127.0.0.1:4001";
+  process.env.NEXT_PUBLIC_SOCKET_URL || "http://127.0.0.1:4001";
 
 
 
@@ -664,6 +661,9 @@ export default function StudentDashboardPage() {
 
     useState<LiveLocation | null>(null);
 
+  const [locationSharing, setLocationSharing] =
+    useState(false);
+
 
 
   const [notifications, setNotifications] =
@@ -709,6 +709,16 @@ export default function StudentDashboardPage() {
     dataRef.current = data;
 
   }, [data]);
+
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    const busId = data?.assignment?.bus?.id;
+
+    if (socket?.connected && busId) {
+      socket.emit("student:join-bus", { busId });
+    }
+  }, [data?.assignment?.bus?.id]);
 
 
 
@@ -1618,17 +1628,11 @@ export default function StudentDashboardPage() {
 
 
 
-        const synth =
-
-          window.speechSynthesis;
-
-
-
         if (!tamilVoice) {
 
           setVoiceStatus(
 
-            "Tamil voice list not exposed. Trying browser/OS ta-IN fallback."
+            "Tamil voice not installed in this browser/Windows."
 
           );
 
@@ -1636,7 +1640,7 @@ export default function StudentDashboardPage() {
 
           console.warn(
 
-            "Tamil voice not found. Browser will choose the ta-IN speech engine if available.",
+            "Tamil voice not found.",
 
             voices.map(
 
@@ -1648,7 +1652,17 @@ export default function StudentDashboardPage() {
 
           );
 
+
+
+          return;
+
         }
+
+
+
+        const synth =
+
+          window.speechSynthesis;
 
 
 
@@ -1672,13 +1686,9 @@ export default function StudentDashboardPage() {
 
 
 
-        if (tamilVoice) {
+        utterance.voice =
 
-          utterance.voice =
-
-            tamilVoice;
-
-        }
+          tamilVoice;
 
 
 
@@ -1698,7 +1708,7 @@ export default function StudentDashboardPage() {
 
           setVoiceStatus(
 
-            `Speaking Tamil: ${tamilVoice?.name || "ta-IN browser voice"}`
+            `Speaking Tamil: ${tamilVoice.name}`
 
           );
 
@@ -1710,7 +1720,7 @@ export default function StudentDashboardPage() {
 
           setVoiceStatus(
 
-            `Tamil voice ready: ${tamilVoice?.name || "ta-IN browser voice"}`
+            `Tamil voice ready: ${tamilVoice.name}`
 
           );
 
@@ -1962,15 +1972,22 @@ export default function StudentDashboardPage() {
 
         setVoiceStatus(
 
-          "Tamil voice list not exposed. Trying browser/OS ta-IN fallback."
+          "Tamil voice not installed. Beep works, but Tamil Speech Voice is missing."
 
         );
+
+
 
         console.warn(
 
-          "No Tamil voice listed; continuing with ta-IN fallback."
+          "No Tamil voice available."
 
         );
+
+
+
+        return;
+
       }
 
 
@@ -2041,13 +2058,9 @@ export default function StudentDashboardPage() {
 
 
 
-      if (tamilVoice) {
+      utterance.voice =
 
-        utterance.voice =
-
-          tamilVoice;
-
-      }
+        tamilVoice;
 
 
 
@@ -2512,23 +2525,17 @@ export default function StudentDashboardPage() {
 
 
         socket.on(
-
           "connect",
-
           () => {
-
             if (mounted) {
-
-              setConnected(
-
-                true
-
-              );
-
+              setConnected(true);
+              const current = dataRef.current;
+              const busId = current?.assignment?.bus?.id;
+              if (busId) {
+                socket.emit("student:join-bus", { busId });
+              }
             }
-
           }
-
         );
 
 
@@ -2586,6 +2593,24 @@ export default function StudentDashboardPage() {
         );
 
 
+
+        /*
+
+         * DRIVER LIVE-LOCATION SHARING STATUS
+
+         */
+
+        socket.on(
+          "bus:sharing-status",
+          (payload: { busId?: string; tripId?: string; sharing?: boolean }) => {
+            const current = dataRef.current;
+            if (!current?.assignment) return;
+            if (payload.busId && payload.busId !== current.assignment.bus.id) return;
+            if (payload.tripId && current.trip && payload.tripId !== current.trip.id) return;
+            setLocationSharing(Boolean(payload.sharing));
+            if (!payload.sharing) setLiveLocation(null);
+          }
+        );
 
         /*
 
@@ -2907,7 +2932,7 @@ export default function StudentDashboardPage() {
 
             spokenRef.current.clear();
 
-
+            setLocationSharing(false);
 
             setLiveLocation(
 
@@ -2930,6 +2955,8 @@ export default function StudentDashboardPage() {
           "trip:completed",
 
           () => {
+
+            setLocationSharing(false);
 
             setLiveLocation(
 
@@ -3348,78 +3375,7 @@ export default function StudentDashboardPage() {
 
 
   const location =
-
-    liveLocation ??
-
-    (data.latestLocation &&
-
-    data.trip
-
-      ? {
-
-          tripId:
-
-            data.trip.id,
-
-
-
-          busId:
-
-            assignment.bus.id,
-
-
-
-          latitude:
-
-            data.latestLocation
-
-              .latitude,
-
-
-
-          longitude:
-
-            data.latestLocation
-
-              .longitude,
-
-
-
-          accuracy:
-
-            data.latestLocation
-
-              .accuracy,
-
-
-
-          speed:
-
-            data.latestLocation
-
-              .speed,
-
-
-
-          heading:
-
-            data.latestLocation
-
-              .heading,
-
-
-
-          recordedAt:
-
-            data.latestLocation
-
-              .recordedAt,
-
-        }
-
-      : null);
-
-
+    locationSharing ? liveLocation : null;
 
   let distanceToStop:
 
@@ -3596,20 +3552,6 @@ export default function StudentDashboardPage() {
                 : "● Realtime Offline"}
 
             </span>
-
-
-
-            <a
-
-              href="/student/creator"
-
-              className="hidden rounded-xl border border-cyan-400/20 bg-cyan-500/5 px-4 py-2 text-sm font-semibold text-cyan-200 hover:bg-cyan-500/10 sm:inline-flex"
-
-            >
-
-              Developer Profile
-
-            </a>
 
 
 
@@ -3922,25 +3864,17 @@ export default function StudentDashboardPage() {
             <div className="flex gap-2">
 
               <span
-
                 className={`rounded-full px-3 py-1 text-xs font-bold ${
-
-                  stale
-
-                    ? "bg-amber-500/10 text-amber-300"
-
-                    : "bg-emerald-500/10 text-emerald-300"
-
+                  locationSharing
+                    ? "bg-emerald-500/10 text-emerald-300"
+                    : "bg-slate-500/10 text-slate-400"
                 }`}
-
               >
-
-                {stale
-
-                  ? "● GPS STALE"
-
-                  : "● GPS LIVE"}
-
+                {locationSharing
+                  ? stale
+                    ? "● LIVE SHARE · GPS STALE"
+                    : "● DRIVER LIVE SHARING"
+                  : "● DRIVER SHARING OFF"}
               </span>
 
 
@@ -3964,6 +3898,18 @@ export default function StudentDashboardPage() {
           </div>
 
 
+
+          <div
+            className={`border-b px-5 py-3 text-sm ${
+              locationSharing
+                ? "border-emerald-500/10 bg-emerald-500/5 text-emerald-200"
+                : "border-white/10 bg-slate-950/30 text-slate-400"
+            }`}
+          >
+            {locationSharing
+              ? "🟢 Driver is sharing this bus live location with students assigned to this bus."
+              : "📍 Driver live-location sharing is currently OFF."}
+          </div>
 
           <div className="h-[380px] w-full">
 
@@ -4022,15 +3968,17 @@ export default function StudentDashboardPage() {
 
 
           {!location && (
-
-            <div className="border-t border-yellow-500/10 bg-yellow-500/5 px-5 py-4 text-sm text-yellow-200">
-
-              🚌 Driver GPS location
-
-              இன்னும் கிடைக்கவில்லை.
-
+            <div
+              className={`border-t px-5 py-4 text-sm ${
+                locationSharing
+                  ? "border-yellow-500/10 bg-yellow-500/5 text-yellow-200"
+                  : "border-white/10 bg-white/[0.02] text-slate-400"
+              }`}
+            >
+              {locationSharing
+                ? "🚌 Driver GPS location இன்னும் கிடைக்கவில்லை."
+                : "📍 Driver has not started live-location sharing for this bus."}
             </div>
-
           )}
 
 
@@ -4985,25 +4933,7 @@ export default function StudentDashboardPage() {
 
         <footer className="py-8 text-center text-xs text-slate-600">
 
-          <div>
-
-            Live Student Bus Tracking
-
-          </div>
-
-
-
-          <a
-
-            href="/student/creator"
-
-            className="mt-2 inline-flex text-cyan-400 transition hover:text-cyan-300"
-
-          >
-
-            Developer Profile →
-
-          </a>
+          Live Student Bus Tracking
 
         </footer>
 

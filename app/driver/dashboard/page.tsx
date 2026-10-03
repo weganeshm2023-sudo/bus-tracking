@@ -95,6 +95,8 @@ export default function DriverDashboardPage() {
   const [startingTrip, setStartingTrip] = useState(false);
   const [stoppingTrip, setStoppingTrip] = useState(false);
   const [sendingGPS, setSendingGPS] = useState(false);
+  const [locationSharing, setLocationSharing] = useState(false);
+  const [sharingBusy, setSharingBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("Tamil voice ready");
@@ -305,65 +307,25 @@ export default function DriverDashboardPage() {
     try {
       if (socketRef.current?.connected) return socketRef.current;
 
-      const getFreshSocketToken = async () => {
-        const tokenResponse = await fetch("/api/auth/socket-token", {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            Accept: "application/json",
-          },
-        });
+      const tokenResponse = await fetch("/api/auth/socket-token", {
+        credentials: "include",
+        cache: "no-store",
+      });
 
-        let tokenData: {
-          success?: boolean;
-          token?: string;
-          message?: string;
-        } = {};
+      const tokenData = await tokenResponse.json();
 
-        try {
-          tokenData = await tokenResponse.json();
-        } catch {
-          tokenData = {};
-        }
-
-        if (!tokenResponse.ok || !tokenData?.token) {
-          if (tokenResponse.status === 401 || tokenResponse.status === 403) {
-            window.location.href = "/driver/login";
-          }
-
-          throw new Error(
-            tokenData.message || "Socket token unavailable."
-          );
-        }
-
-        return tokenData.token;
-      };
+      if (!tokenResponse.ok || !tokenData?.token) {
+        setSocketStatus("Socket token unavailable");
+        return null;
+      }
 
       socketRef.current?.disconnect();
 
       const socket = io(SOCKET_URL, {
         transports: ["websocket", "polling"],
+        auth: { token: tokenData.token },
         withCredentials: true,
         reconnection: true,
-        reconnectionAttempts: Infinity,
-        reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        timeout: 15000,
-
-        // IMPORTANT: this callback runs for every Socket.IO connection
-        // attempt, including automatic reconnects after ping timeout or
-        // transport close. Therefore an expired 10-minute JWT is never
-        // reused during a new handshake.
-        auth: async (callback) => {
-          try {
-            const token = await getFreshSocketToken();
-            callback({ token });
-          } catch (error) {
-            console.error("DRIVER_SOCKET_TOKEN_REFRESH_ERROR", error);
-            callback({});
-          }
-        },
       });
 
       socketRef.current = socket;
@@ -374,33 +336,29 @@ export default function DriverDashboardPage() {
         setSocketStatus("Connected");
       });
 
-      socket.on("disconnect", (reason) => {
+      socket.on("disconnect", () => {
         if (!mountedRef.current) return;
         setSocketConnected(false);
-        setSocketStatus(
-          reason === "io server disconnect"
-            ? "Disconnected by server — reconnecting..."
-            : "Reconnecting..."
-        );
+        setSocketStatus("Disconnected");
       });
 
       socket.on("connect_error", (err) => {
         console.error("DRIVER_SOCKET_ERROR", err);
-        if (!mountedRef.current) return;
-
         setSocketConnected(false);
-
-        const message =
-          typeof err?.message === "string" ? err.message : "";
-
-        if (message.toLowerCase().includes("unauthorized")) {
-          setSocketStatus("Refreshing realtime authentication...");
-        } else {
-          setSocketStatus("Connection error — retrying...");
-        }
+        setSocketStatus("Connection error");
       });
 
+      socket.on(
+        "bus:sharing-status",
+        (payload: { busId?: string; tripId?: string; sharing?: boolean }) => {
+          const currentTrip = selectedTripIdRef.current;
+          if (payload.tripId && currentTrip && payload.tripId !== currentTrip) return;
+          setLocationSharing(Boolean(payload.sharing));
+        }
+      );
+
       socket.on("trip:started", () => {
+        setLocationSharing(false);
         voiceThresholdsRef.current.clear();
         void speakTamil(
           "டிரைவர் பஸ் பயணம் தொடங்கப்பட்டுள்ளது. பாதுகாப்பாக ஓட்டுங்கள்."
@@ -582,6 +540,55 @@ export default function DriverDashboardPage() {
     );
   }, [loadDashboard, selectedTrip, socketConnected, speakTamil, startGPS]);
 
+  const startLocationSharing = useCallback(() => {
+    const tripId = selectedTrip?.id;
+    const socket = socketRef.current;
+
+    if (selectedTrip?.status !== "RUNNING") {
+      setError("Start the trip before sharing live location.");
+      return;
+    }
+
+    if (!tripId || !socket?.connected) {
+      setError("Realtime socket is not connected or trip is missing.");
+      return;
+    }
+
+    setSharingBusy(true);
+    setError("");
+    socket.emit("driver:start-sharing", { tripId }, (response: { success?: boolean; message?: string }) => {
+      setSharingBusy(false);
+      if (!response?.success) {
+        setError(response?.message || "Unable to start live-location sharing.");
+        return;
+      }
+      setLocationSharing(true);
+      setMessage("Live location is now shared with students assigned to this bus.");
+    });
+  }, [selectedTrip, socketConnected]);
+
+  const stopLocationSharing = useCallback(() => {
+    const tripId = selectedTrip?.id;
+    const socket = socketRef.current;
+
+    if (!tripId || !socket?.connected) {
+      setError("Realtime socket is not connected or trip is missing.");
+      return;
+    }
+
+    setSharingBusy(true);
+    setError("");
+    socket.emit("driver:stop-sharing", { tripId }, (response: { success?: boolean; message?: string }) => {
+      setSharingBusy(false);
+      if (!response?.success) {
+        setError(response?.message || "Unable to stop live-location sharing.");
+        return;
+      }
+      setLocationSharing(false);
+      setMessage("Live location sharing stopped.");
+    });
+  }, [selectedTrip, socketConnected]);
+
   const stopTrip = useCallback(async () => {
     const tripId = selectedTrip?.id;
     const socket = socketRef.current;
@@ -607,6 +614,7 @@ export default function DriverDashboardPage() {
         }
 
         setMessage("Trip completed successfully.");
+        setLocationSharing(false);
         stopGPS();
         void speakTamil("பஸ் பயணம் முடிக்கப்பட்டுள்ளது.");
         void loadDashboard();
@@ -809,6 +817,46 @@ export default function DriverDashboardPage() {
                   {stoppingTrip ? "Stopping..." : "Stop Trip"}
                 </button>
               )}
+
+              {selectedTrip?.status === "RUNNING" && (
+                <button
+                  type="button"
+                  onClick={locationSharing ? stopLocationSharing : startLocationSharing}
+                  disabled={sharingBusy || !socketConnected}
+                  className={`rounded-xl px-5 py-3 text-sm font-black disabled:opacity-50 ${
+                    locationSharing
+                      ? "border border-red-400/30 bg-red-500/15 text-red-300"
+                      : "bg-cyan-400 text-slate-950"
+                  }`}
+                >
+                  {sharingBusy
+                    ? "Updating..."
+                    : locationSharing
+                      ? "📍 Stop Live Sharing"
+                      : "📍 Share Live Location"}
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.16em] text-cyan-400">
+                Student Live Location
+              </p>
+              <h2 className="mt-1 text-lg font-black">Share this bus location</h2>
+              <p className="mt-1 text-sm text-slate-400">
+                Only students assigned to this bus can receive the live location.
+              </p>
+            </div>
+            <div className={`rounded-full border px-4 py-2 text-xs font-black ${
+              locationSharing
+                ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300"
+                : "border-white/10 bg-slate-950/60 text-slate-400"
+            }`}>
+              {locationSharing ? "● LIVE SHARING ON" : "● SHARING OFF"}
             </div>
           </div>
         </section>
